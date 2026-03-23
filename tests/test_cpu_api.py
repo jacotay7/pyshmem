@@ -11,6 +11,9 @@ import pytest
 import pyshare
 
 
+pytestmark = pytest.mark.cpu
+
+
 def _read_cpu_payload(name: str, queue) -> None:
     shm = pyshare.open(name)
     payload = shm.read()

@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
 
 jobs:
   test:
@@ -24,9 +26,9 @@ jobs:
       - name: Run lint
         run: ruff check .
       - name: Run CPU test suite
-        run: pytest -m "not gpu and not benchmark"
+        run: pytest -m "cpu and not benchmark"
       - name: Run benchmark smoke
         env:
           PYSHARE_ENFORCE_BENCHMARK: "0"
-          PYSHARE_TARGET_HZ: "5000"
-        run: pytest -m "benchmark and not gpu" -q -s
+          PYSHARE_TARGET_HZ: "50000"
+        run: pytest -m "cpu and benchmark" -q -s

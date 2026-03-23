@@ -9,7 +9,7 @@ import pytest
 import pyshare
 
 
-pytestmark = pytest.mark.benchmark
+pytestmark = [pytest.mark.cpu, pytest.mark.benchmark]
 
 
 def test_cpu_roundtrip_rate_128_square(shm_name, record_property):
@@ -30,7 +30,7 @@ def test_cpu_roundtrip_rate_128_square(shm_name, record_property):
     elapsed = time.perf_counter() - start
 
     rate_hz = iterations / elapsed
-    target_hz = float(os.environ.get("PYSHARE_TARGET_HZ", "5000"))
+    target_hz = float(os.environ.get("PYSHARE_TARGET_HZ", "50000"))
     enforce_target = os.environ.get("PYSHARE_ENFORCE_BENCHMARK", "0") == "1"
 
     record_property("pyshare_cpu_roundtrip_hz", rate_hz)
