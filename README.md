@@ -1,6 +1,6 @@
-# pyshare
+# pyshmem
 
-pyshare is a small shared-memory library that presents one API for CPU-backed NumPy buffers and optional CUDA-backed PyTorch mirrors.
+pyshmem is a small shared-memory library that presents one API for CPU-backed NumPy buffers and optional CUDA-backed PyTorch mirrors.
 
 The initial scaffold is intentionally narrow. The goal is to lock down a simple public API and a test contract before expanding the implementation surface.
 
@@ -32,9 +32,9 @@ pip install -e .[test,gpu]
 
 ```python
 import numpy as np
-import pyshare
+import pyshmem
 
-writer = pyshare.create(
+writer = pyshmem.create(
 	"demo_frame",
 	shape=(4, 4),
 	dtype=np.float32,
@@ -43,18 +43,18 @@ writer = pyshare.create(
 
 writer.write(np.ones((4, 4), dtype=np.float32))
 
-reader = pyshare.open("demo_frame")
+reader = pyshmem.open("demo_frame")
 frame = reader.read()
 next_frame = reader.read_new(timeout=1.0)
 ```
 
 Current public entry points:
 
-- `pyshare.SharedMemory`
-- `pyshare.create(name, *, shape, dtype=np.float32, size=None, gpu_device=None)`
-- `pyshare.open(name, *, gpu_device=None)`
-- `pyshare.unlink(name)`
-- `pyshare.gpu_available()`
+- `pyshmem.SharedMemory`
+- `pyshmem.create(name, *, shape, dtype=np.float32, size=None, gpu_device=None)`
+- `pyshmem.open(name, *, gpu_device=None)`
+- `pyshmem.unlink(name)`
+- `pyshmem.gpu_available()`
 
 Returned objects expose:
 
@@ -98,12 +98,12 @@ Lifecycle semantics are intentionally destructive:
 - `x.close()` is non-destructive, idempotent, and only releases the local handle
 
 Closed handles are guarded explicitly. After `x.close()`, operations such as
-`read`, `write`, `acquire`, `clear`, and metadata access raise a pyshare-level
+`read`, `write`, `acquire`, `clear`, and metadata access raise a pyshmem-level
 `RuntimeError` that instructs the caller to reopen the segment with
-`pyshare.open(...)`.
+`pyshmem.open(...)`.
 
-Missing segments also raise a clearer pyshare-level `FileNotFoundError`
-explaining that the caller likely needs `pyshare.create(...)` first.
+Missing segments also raise a clearer pyshmem-level `FileNotFoundError`
+explaining that the caller likely needs `pyshmem.create(...)` first.
 
 ## Testing
 
@@ -148,7 +148,7 @@ The repository includes a benchmark-marked test that measures repeated
 run in CI as a smoke test and can be enforced locally with:
 
 ```bash
-PYSHARE_ENFORCE_BENCHMARK=1 PYSHARE_TARGET_HZ=50000 pytest -m "cpu and benchmark" -q -s
+pyshmem_ENFORCE_BENCHMARK=1 pyshmem_TARGET_HZ=50000 pytest -m "cpu and benchmark" -q -s
 ```
 
 Hosted CI runners are not reliable performance labs, so the benchmark smoke

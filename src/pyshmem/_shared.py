@@ -117,7 +117,7 @@ def _gpu_handle_name(name: str) -> str:
 
 
 def _lock_path(name: str) -> str:
-    directory = os.path.join(tempfile.gettempdir(), "pyshare-locks")
+    directory = os.path.join(tempfile.gettempdir(), "pyshmem-locks")
     return os.path.join(directory, f"{_segment_base_name(name)}.lock")
 
 
@@ -248,14 +248,14 @@ def _open_existing_segment(name: str) -> shared_memory.SharedMemory | None:
 def _missing_name_error(name: str) -> FileNotFoundError:
     return FileNotFoundError(
         f"shared memory {name!r} does not exist; "
-        f"create it with pyshare.create({name!r}, ...) first"
+        f"create it with pyshmem.create({name!r}, ...) first"
     )
 
 
 def _duplicate_name_error(name: str) -> FileExistsError:
     return FileExistsError(
         f"shared memory {name!r} already exists; "
-        f"use pyshare.open({name!r}) to attach to it"
+        f"use pyshmem.open({name!r}) to attach to it"
     )
 
 
@@ -350,7 +350,7 @@ class SharedMemory:
         if self._closed:
             raise RuntimeError(
                 f"cannot {operation} closed shared memory {self.name!r}; "
-                f"reopen it with pyshare.open({self.name!r})"
+                f"reopen it with pyshmem.open({self.name!r})"
             )
 
     def _lock_owned_by_current_thread(self) -> bool:
@@ -592,7 +592,7 @@ class SharedMemory:
         if int(metadata[METADATA_INDEX_VERSION]) != METADATA_VERSION:
             metadata_shm.close()
             raise ValueError(
-                f"{name!r} does not contain a supported pyshare metadata block"
+                f"{name!r} does not contain a supported pyshmem metadata block"
             )
 
         dtype = _code_to_dtype(metadata[METADATA_INDEX_DTYPE])

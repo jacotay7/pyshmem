@@ -4,11 +4,11 @@ import uuid
 
 import pytest
 
-import pyshare
+import pyshmem
 
 
 @pytest.fixture
 def shm_name():
-    name = f"pyshare_{uuid.uuid4().hex}"
+    name = f"pyshmem_{uuid.uuid4().hex}"
     yield name
-    pyshare.unlink(name)
+    pyshmem.unlink(name)

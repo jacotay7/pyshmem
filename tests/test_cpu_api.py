@@ -8,14 +8,14 @@ import time
 import numpy as np
 import pytest
 
-import pyshare
+import pyshmem
 
 
 pytestmark = pytest.mark.cpu
 
 
 def _read_cpu_payload(name: str, queue) -> None:
-    shm = pyshare.open(name)
+    shm = pyshmem.open(name)
     payload = shm.read()
     queue.put(
         {
@@ -29,7 +29,7 @@ def _read_cpu_payload(name: str, queue) -> None:
 
 
 def _hold_lock(name: str, queue, hold_seconds: float) -> None:
-    shm = pyshare.open(name)
+    shm = pyshmem.open(name)
     with shm.locked(timeout=1.0):
         queue.put("locked")
         time.sleep(hold_seconds)
@@ -37,27 +37,27 @@ def _hold_lock(name: str, queue, hold_seconds: float) -> None:
 
 
 def _crash_while_holding_lock(name: str, event) -> None:
-    shm = pyshare.open(name)
+    shm = pyshmem.open(name)
     shm.acquire(timeout=1.0)
     event.set()
     os._exit(0)
 
 
 def _create_write_and_exit(name: str, event) -> None:
-    shm = pyshare.create(name, shape=(2, 2), dtype=np.float32)
+    shm = pyshmem.create(name, shape=(2, 2), dtype=np.float32)
     shm.write(np.full((2, 2), 7.0, dtype=np.float32))
     event.set()
     shm.close()
 
 
 def test_import_exposes_public_api():
-    assert callable(pyshare.create)
-    assert callable(pyshare.open)
-    assert pyshare.SharedMemory is not None
+    assert callable(pyshmem.create)
+    assert callable(pyshmem.open)
+    assert pyshmem.SharedMemory is not None
 
 
 def test_instance_does_not_expose_module_factory_methods(shm_name):
-    shm = pyshare.create(shm_name, shape=(1,), dtype=np.float32)
+    shm = pyshmem.create(shm_name, shape=(1,), dtype=np.float32)
 
     assert not hasattr(shm, "create")
     assert not hasattr(shm, "open")
@@ -66,7 +66,7 @@ def test_instance_does_not_expose_module_factory_methods(shm_name):
 
 
 def test_create_write_read_round_trip_cpu(shm_name):
-    shm = pyshare.create(shm_name, shape=(2, 3), dtype=np.float32)
+    shm = pyshmem.create(shm_name, shape=(2, 3), dtype=np.float32)
 
     assert shm.name == shm_name
     assert shm.shape == (2, 3)
@@ -86,17 +86,17 @@ def test_create_write_read_round_trip_cpu(shm_name):
 
 def test_open_reports_clear_error_for_missing_name(shm_name):
     with pytest.raises(FileNotFoundError, match="does not exist") as exc_info:
-        pyshare.open(shm_name)
+        pyshmem.open(shm_name)
 
-    assert f"pyshare.create({shm_name!r}, ...)" in str(exc_info.value)
+    assert f"pyshmem.create({shm_name!r}, ...)" in str(exc_info.value)
 
 
 def test_open_reconstructs_shape_dtype_and_contents(shm_name):
-    writer = pyshare.create(shm_name, shape=(4,), dtype=np.int32)
+    writer = pyshmem.create(shm_name, shape=(4,), dtype=np.int32)
     payload = np.array([1, 2, 3, 4], dtype=np.int32)
     writer.write(payload)
 
-    reader = pyshare.open(shm_name)
+    reader = pyshmem.open(shm_name)
 
     assert reader.name == shm_name
     assert reader.shape == (4,)
@@ -110,8 +110,8 @@ def test_open_reconstructs_shape_dtype_and_contents(shm_name):
 
 
 def test_read_new_waits_for_next_write(shm_name):
-    writer = pyshare.create(shm_name, shape=(2, 2), dtype=np.float32)
-    reader = pyshare.open(shm_name)
+    writer = pyshmem.create(shm_name, shape=(2, 2), dtype=np.float32)
+    reader = pyshmem.open(shm_name)
     writer.write(np.zeros((2, 2), dtype=np.float32))
     np.testing.assert_array_equal(
         reader.read(), np.zeros((2, 2), dtype=np.float32)
@@ -136,8 +136,8 @@ def test_read_new_waits_for_next_write(shm_name):
 
 
 def test_read_new_times_out_when_no_new_write_arrives(shm_name):
-    writer = pyshare.create(shm_name, shape=(1,), dtype=np.float32)
-    reader = pyshare.open(shm_name)
+    writer = pyshmem.create(shm_name, shape=(1,), dtype=np.float32)
+    reader = pyshmem.open(shm_name)
 
     with pytest.raises(TimeoutError):
         reader.read_new(timeout=0.05)
@@ -147,8 +147,8 @@ def test_read_new_times_out_when_no_new_write_arrives(shm_name):
 
 
 def test_safe_reads_stay_consistent_during_concurrent_writes(shm_name):
-    writer = pyshare.create(shm_name, shape=(32, 32), dtype=np.float32)
-    reader = pyshare.open(shm_name)
+    writer = pyshmem.create(shm_name, shape=(32, 32), dtype=np.float32)
+    reader = pyshmem.open(shm_name)
     stop_event = threading.Event()
     failures: list[str] = []
 
@@ -174,7 +174,7 @@ def test_safe_reads_stay_consistent_during_concurrent_writes(shm_name):
 
 
 def test_cpu_stream_can_be_opened_in_another_process(shm_name):
-    writer = pyshare.create(shm_name, shape=(2, 3), dtype=np.float32)
+    writer = pyshmem.create(shm_name, shape=(2, 3), dtype=np.float32)
     payload = np.arange(6, dtype=np.float32).reshape(2, 3)
     writer.write(payload)
 
@@ -195,10 +195,10 @@ def test_cpu_stream_can_be_opened_in_another_process(shm_name):
 
 
 def test_cross_process_lock_blocks_explicit_acquire_until_release(shm_name):
-    writer = pyshare.create(shm_name, shape=(4,), dtype=np.float32)
+    writer = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
     payload = np.arange(4, dtype=np.float32)
     writer.write(payload)
-    reader = pyshare.open(shm_name)
+    reader = pyshmem.open(shm_name)
 
     context = mp.get_context("spawn")
     queue = context.Queue()
@@ -222,7 +222,7 @@ def test_cross_process_lock_blocks_explicit_acquire_until_release(shm_name):
 
 
 def test_unsafe_read_requires_explicit_lock(shm_name):
-    writer = pyshare.create(shm_name, shape=(2,), dtype=np.float32)
+    writer = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
     writer.write(np.array([1.0, 2.0], dtype=np.float32))
 
     with pytest.raises(RuntimeError, match="safe=False requires"):
@@ -238,7 +238,7 @@ def test_unsafe_read_requires_explicit_lock(shm_name):
 
 
 def test_clear_resets_contents_to_zero(shm_name):
-    shm = pyshare.create(shm_name, shape=(2, 2), dtype=np.float32)
+    shm = pyshmem.create(shm_name, shape=(2, 2), dtype=np.float32)
     shm.write(np.ones((2, 2), dtype=np.float32))
 
     initial_count = shm.count
@@ -253,17 +253,17 @@ def test_clear_resets_contents_to_zero(shm_name):
 
 
 def test_delete_alias_unlinks_shared_memory(shm_name):
-    shm = pyshare.create(shm_name, shape=(2,), dtype=np.float32)
+    shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
     shm.write(np.array([1.0, 2.0], dtype=np.float32))
 
     shm.delete()
 
     with pytest.raises(FileNotFoundError):
-        pyshare.open(shm_name)
+        pyshmem.open(shm_name)
 
 
 def test_closed_handle_operations_raise_clear_errors(shm_name):
-    shm = pyshare.create(shm_name, shape=(2,), dtype=np.float32)
+    shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
     shm.close()
 
     operations = (
@@ -284,14 +284,14 @@ def test_closed_handle_operations_raise_clear_errors(shm_name):
 
 
 def test_close_is_idempotent(shm_name):
-    shm = pyshare.create(shm_name, shape=(2,), dtype=np.float32)
+    shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
 
     shm.close()
     shm.close()
 
 
 def test_process_crash_releases_lock(shm_name):
-    shm = pyshare.create(shm_name, shape=(2,), dtype=np.float32)
+    shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
     shm.write(np.array([1.0, 2.0], dtype=np.float32))
 
     context = mp.get_context("spawn")
@@ -333,7 +333,7 @@ def test_creator_exit_leaves_shared_memory_usable(shm_name):
     process.join(timeout=20)
     assert process.exitcode == 0
 
-    shm = pyshare.open(shm_name)
+    shm = pyshmem.open(shm_name)
     np.testing.assert_array_equal(
         shm.read(), np.full((2, 2), 7.0, dtype=np.float32)
     )
@@ -341,7 +341,7 @@ def test_creator_exit_leaves_shared_memory_usable(shm_name):
 
 
 def test_release_without_acquire_reports_unlocked_state(shm_name):
-    shm = pyshare.create(shm_name, shape=(2,), dtype=np.float32)
+    shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
 
     with pytest.raises(RuntimeError, match="unlocked"):
         shm.release()
@@ -350,7 +350,7 @@ def test_release_without_acquire_reports_unlocked_state(shm_name):
 
 
 def test_reentrant_acquire_requires_balanced_release(shm_name):
-    shm = pyshare.create(shm_name, shape=(2,), dtype=np.float32)
+    shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
 
     shm.acquire()
     shm.acquire()
@@ -371,11 +371,11 @@ def test_reentrant_acquire_requires_balanced_release(shm_name):
 
 
 def test_close_and_reopen_preserves_repr_and_metadata(shm_name):
-    writer = pyshare.create(shm_name, shape=(3, 3), dtype=np.float32)
+    writer = pyshmem.create(shm_name, shape=(3, 3), dtype=np.float32)
     writer.write(np.ones((3, 3), dtype=np.float32))
     writer.close()
 
-    reopened = pyshare.open(shm_name)
+    reopened = pyshmem.open(shm_name)
 
     assert repr(reopened) == (
         "SharedMemory(name='{}', shape=(3, 3), dtype='float32', "
@@ -390,15 +390,15 @@ def test_close_and_reopen_preserves_repr_and_metadata(shm_name):
 
 def test_create_rejects_mismatched_size(shm_name):
     with pytest.raises(ValueError, match="size does not match"):
-        pyshare.create(shm_name, shape=(2, 2), dtype=np.float32, size=12)
+        pyshmem.create(shm_name, shape=(2, 2), dtype=np.float32, size=12)
 
 
 def test_create_reports_clear_error_for_existing_name(shm_name):
-    writer = pyshare.create(shm_name, shape=(2, 2), dtype=np.float32)
+    writer = pyshmem.create(shm_name, shape=(2, 2), dtype=np.float32)
 
     with pytest.raises(FileExistsError, match="already exists") as exc_info:
-        pyshare.create(shm_name, shape=(2, 2), dtype=np.float32)
+        pyshmem.create(shm_name, shape=(2, 2), dtype=np.float32)
 
-    assert f"use pyshare.open({shm_name!r})" in str(exc_info.value)
+    assert f"use pyshmem.open({shm_name!r})" in str(exc_info.value)
 
     writer.close()

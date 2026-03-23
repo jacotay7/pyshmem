@@ -3,7 +3,7 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pyshare"
+name = "pyshmem"
 version = "0.1.0"
 description = "Unified CPU/GPU shared memory primitives for Python."
 readme = { file = "README.md", content-type = "text/markdown" }
@@ -44,7 +44,7 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["pyshare", "pyshare.*"]
+include = ["pyshmem", "pyshmem.*"]
 
 [tool.ruff]
 line-length = 79

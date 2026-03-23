@@ -29,6 +29,6 @@ jobs:
         run: pytest -m "cpu and not benchmark"
       - name: Run benchmark smoke
         env:
-          PYSHARE_ENFORCE_BENCHMARK: "0"
-          PYSHARE_TARGET_HZ: "50000"
+          pyshmem_ENFORCE_BENCHMARK: "0"
+          pyshmem_TARGET_HZ: "50000"
         run: pytest -m "cpu and benchmark" -q -s
