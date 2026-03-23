@@ -35,7 +35,10 @@ def _record_rate(
 ) -> float:
     rate_hz = iterations / elapsed
     record_property(property_name, rate_hz)
-    print(f"{label}: {rate_hz:.1f} Hz ({elapsed * 1e3 / iterations:.3f} ms/op)")
+    print(
+        f"{label}: {rate_hz:.1f} Hz "
+        f"({elapsed * 1e3 / iterations:.3f} ms/op)"
+    )
     return rate_hz
 
 
@@ -121,7 +124,9 @@ def test_gpu_roundtrip_rate_128_square(shm_name, record_property):
     elapsed = time.perf_counter() - start
 
     target_hz = _env_float("PYSHARE_GPU_TARGET_HZ", 0.0)
-    enforce_target = os.environ.get("PYSHARE_ENFORCE_GPU_BENCHMARK", "0") == "1"
+    enforce_target = (
+        os.environ.get("PYSHARE_ENFORCE_GPU_BENCHMARK", "0") == "1"
+    )
 
     rate_hz = _record_rate(
         record_property=record_property,
@@ -156,8 +161,12 @@ def test_cpu_shared_memory_mvm_pipeline(shm_name, record_property):
     matrix /= float(matrix_dim)
     initial_vector = _contiguous_vector(0, matrix_dim)
 
-    matrix_writer = pyshare.create(matrix_name, shape=matrix.shape, dtype=np.float32)
-    vector_writer = pyshare.create(vector_name, shape=(matrix_dim,), dtype=np.float32)
+    matrix_writer = pyshare.create(
+        matrix_name, shape=matrix.shape, dtype=np.float32
+    )
+    vector_writer = pyshare.create(
+        vector_name, shape=(matrix_dim,), dtype=np.float32
+    )
     matrix_reader = pyshare.open(matrix_name)
     vector_reader = pyshare.open(vector_name)
 
@@ -170,7 +179,9 @@ def test_cpu_shared_memory_mvm_pipeline(shm_name, record_property):
 
     start = time.perf_counter()
     for index in range(iterations):
-        vector_writer.write(_contiguous_vector(index + warmup_iterations, matrix_dim))
+        vector_writer.write(
+            _contiguous_vector(index + warmup_iterations, matrix_dim)
+        )
         result = matrix_reader.read() @ vector_reader.read()
     elapsed = time.perf_counter() - start
 
@@ -184,7 +195,8 @@ def test_cpu_shared_memory_mvm_pipeline(shm_name, record_property):
         record_property=record_property,
         property_name="pyshare_cpu_mvm_pipeline_hz",
         label=(
-            f"pyshare CPU shared-memory MVM pipeline ({matrix_dim}x{matrix_dim})"
+            "pyshare CPU shared-memory MVM pipeline "
+            f"({matrix_dim}x{matrix_dim})"
         ),
         iterations=iterations,
         elapsed=elapsed,
@@ -237,7 +249,9 @@ def test_gpu_shared_memory_mvm_pipeline(shm_name, record_property):
 
     start = time.perf_counter()
     for index in range(iterations):
-        vector_writer.write(_contiguous_vector(index + warmup_iterations, matrix_dim))
+        vector_writer.write(
+            _contiguous_vector(index + warmup_iterations, matrix_dim)
+        )
         result = matrix_reader.read() @ vector_reader.read()
     torch.cuda.synchronize()
     elapsed = time.perf_counter() - start
@@ -257,7 +271,8 @@ def test_gpu_shared_memory_mvm_pipeline(shm_name, record_property):
         record_property=record_property,
         property_name="pyshare_gpu_mvm_pipeline_hz",
         label=(
-            f"pyshare GPU shared-memory MVM pipeline ({matrix_dim}x{matrix_dim})"
+            "pyshare GPU shared-memory MVM pipeline "
+            f"({matrix_dim}x{matrix_dim})"
         ),
         iterations=iterations,
         elapsed=elapsed,
@@ -273,9 +288,14 @@ def test_gpu_shared_memory_mvm_pipeline(shm_name, record_property):
 @pytest.mark.benchmark
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
 def test_gpu_device_resident_mvm_pipeline(shm_name, record_property):
-    matrix_dim = _env_int("PYSHARE_GPU_DEVICE_MVM_DIM", _env_int("PYSHARE_MVM_DIM", 1024))
+    matrix_dim = _env_int(
+        "PYSHARE_GPU_DEVICE_MVM_DIM",
+        _env_int("PYSHARE_MVM_DIM", 1024),
+    )
     iterations = _env_int("PYSHARE_GPU_DEVICE_MVM_ITERATIONS", 200)
-    warmup_iterations = _env_int("PYSHARE_GPU_DEVICE_MVM_WARMUP_ITERATIONS", 20)
+    warmup_iterations = _env_int(
+        "PYSHARE_GPU_DEVICE_MVM_WARMUP_ITERATIONS", 20
+    )
     matrix_name = f"{shm_name}_matrix"
     vector_name = f"{shm_name}_vector"
 
@@ -321,7 +341,8 @@ def test_gpu_device_resident_mvm_pipeline(shm_name, record_property):
         record_property=record_property,
         property_name="pyshare_gpu_device_resident_mvm_pipeline_hz",
         label=(
-            f"pyshare GPU device-resident MVM pipeline ({matrix_dim}x{matrix_dim})"
+            "pyshare GPU device-resident MVM pipeline "
+            f"({matrix_dim}x{matrix_dim})"
         ),
         iterations=iterations,
         elapsed=elapsed,

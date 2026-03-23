@@ -7,9 +7,9 @@ The public API exposed through :mod:`pyshare` is intentionally small:
 - :func:`unlink` destroys a stream by name
 - :func:`gpu_available` reports whether CUDA-backed streams are available
 
-The :class:`SharedMemory` object presents one interface for CPU-only streams and
-GPU-backed streams, with GPU CPU-mirroring controlled explicitly through the
-``cpu_mirror`` argument passed to :func:`create`.
+The :class:`SharedMemory` object presents one interface for CPU-only
+streams and GPU-backed streams, with GPU CPU-mirroring controlled
+explicitly through the ``cpu_mirror`` argument passed to :func:`create`.
 """
 
 from __future__ import annotations
@@ -110,7 +110,7 @@ class _SharedLockState:
 
 
 def gpu_available() -> bool:
-    """Return ``True`` when a CUDA-capable PyTorch installation is available."""
+    """Return ``True`` when CUDA-backed PyTorch streams are available."""
     return bool(torch is not None and torch.cuda.is_available())
 
 
@@ -339,14 +339,15 @@ def unlink(name: str) -> None:
 class SharedMemory:
     """A named shared-memory stream.
 
-    Instances are created via :func:`create` or attached to via :func:`open`.
-    The object exposes shape and dtype metadata, lock management, read and write
-    operations, and lifecycle helpers such as :meth:`close` and :meth:`unlink`.
+    Instances are created via :func:`create` or attached to via
+    :func:`open`. The object exposes shape and dtype metadata, lock
+    management, read and write operations, and lifecycle helpers such as
+    :meth:`close` and :meth:`unlink`.
 
     For GPU-backed streams, ``gpu_device`` identifies the attached CUDA device.
-    When ``cpu_mirror`` is ``False``, CPU-only handles may still inspect metadata
-    and take locks, but they cannot read the payload without reopening with a
-    CUDA attachment.
+    When ``cpu_mirror`` is ``False``, CPU-only handles may still inspect
+    metadata and take locks, but they cannot read the payload without
+    reopening with a CUDA attachment.
     """
     def __init__(
         self,
@@ -538,7 +539,7 @@ class SharedMemory:
         timeout: float | None = None,
         poll_interval: float = 1e-3,
     ):
-        """Return a context manager that acquires and releases the stream lock."""
+        """Return a context manager for the stream lock."""
         self.acquire(timeout=timeout, poll_interval=poll_interval)
         try:
             yield self
@@ -797,10 +798,15 @@ class SharedMemory:
     def clear(self) -> None:
         """Reset the current payload to zeros and record a new write."""
         self._ensure_open("clear")
-        if self.gpu_enabled and self._gpu_tensor is None and not self.cpu_mirror:
+        if (
+            self.gpu_enabled
+            and self._gpu_tensor is None
+            and not self.cpu_mirror
+        ):
             raise RuntimeError(
                 "cannot clear GPU shared memory without a GPU attachment; "
-                f"reopen it with pyshare.open({self.name!r}, gpu_device='cuda:N')"
+                "reopen it with "
+                f"pyshare.open({self.name!r}, gpu_device='cuda:N')"
             )
         with self.locked():
             self._mark_write_started()
@@ -815,9 +821,9 @@ class SharedMemory:
     def write(self, value: Any) -> None:
         """Write a full payload into the stream.
 
-        ``value`` must match the configured shape. CPU-backed streams accept any
-        value understood by :func:`numpy.asarray`; GPU-backed streams also accept
-        CUDA tensors on the configured device.
+        ``value`` must match the configured shape. CPU-backed streams accept
+        values understood by :func:`numpy.asarray`; GPU-backed streams also
+        accept CUDA tensors on the configured device.
         """
         self._ensure_open("write to")
         tensor = None
@@ -835,7 +841,8 @@ class SharedMemory:
         elif self.gpu_enabled and not self.cpu_mirror:
             raise RuntimeError(
                 "cannot write to GPU shared memory without a GPU attachment; "
-                f"reopen it with pyshare.open({self.name!r}, gpu_device='cuda:N')"
+                "reopen it with "
+                f"pyshare.open({self.name!r}, gpu_device='cuda:N')"
             )
         else:
             array = np.asarray(value, dtype=self.dtype)
@@ -876,7 +883,8 @@ class SharedMemory:
             if self.gpu_enabled and not self.cpu_mirror:
                 raise RuntimeError(
                     "GPU shared memory was created without cpu_mirror=True; "
-                    f"reopen it with pyshare.open({self.name!r}, gpu_device='cuda:N')"
+                    "reopen it with "
+                    f"pyshare.open({self.name!r}, gpu_device='cuda:N')"
                 )
             return self._array
 
@@ -885,7 +893,8 @@ class SharedMemory:
         if self.gpu_enabled and not self.cpu_mirror:
             raise RuntimeError(
                 "GPU shared memory was created without cpu_mirror=True; "
-                f"reopen it with pyshare.open({self.name!r}, gpu_device='cuda:N')"
+                "reopen it with "
+                f"pyshare.open({self.name!r}, gpu_device='cuda:N')"
             )
         return self._read_consistent_cpu(poll_interval)
 
@@ -1016,8 +1025,8 @@ def create(
     gpu_device:
         Optional CUDA device identifier such as ``"cuda:0"``.
     cpu_mirror:
-        Controls whether GPU-backed streams also maintain a CPU mirror. Defaults
-        to ``True`` for CPU streams and ``False`` for GPU streams.
+        Controls whether GPU-backed streams also maintain a CPU mirror.
+        Defaults to ``True`` for CPU streams and ``False`` for GPU streams.
     """
     return SharedMemory._create(
         name,

@@ -88,7 +88,9 @@ def test_create_write_read_round_trip_gpu(shm_name):
 
 
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
-def test_gpu_stream_without_cpu_mirror_requires_gpu_attachment_for_reads(shm_name):
+def test_gpu_stream_without_cpu_mirror_requires_gpu_attachment_for_reads(
+    shm_name,
+):
     writer = pyshare.create(
         shm_name, shape=(2, 2), dtype=np.float32, gpu_device="cuda:0"
     )
@@ -105,7 +107,9 @@ def test_gpu_stream_without_cpu_mirror_requires_gpu_attachment_for_reads(shm_nam
 
 
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
-def test_gpu_stream_with_cpu_mirror_can_be_read_without_gpu_attachment(shm_name):
+def test_gpu_stream_with_cpu_mirror_can_be_read_without_gpu_attachment(
+    shm_name,
+):
     writer = pyshare.create(
         shm_name,
         shape=(2, 2),
@@ -324,7 +328,9 @@ def test_clear_resets_contents_to_zero(shm_name):
     initial_count = shm.count
     shm.clear()
 
-    assert torch.equal(shm.read().cpu(), torch.zeros((2, 2), dtype=torch.float32))
+    assert torch.equal(
+        shm.read().cpu(), torch.zeros((2, 2), dtype=torch.float32)
+    )
     assert shm.count == initial_count + 1
 
     shm.close()
