@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import sys
 import threading
 import time
 
@@ -12,6 +13,7 @@ import pyshmem
 
 
 pytestmark = pytest.mark.cpu
+WINDOWS_SHARED_MEMORY_IS_EPHEMERAL = sys.platform == "win32"
 
 
 def _read_cpu_payload(name: str, queue) -> None:
@@ -320,6 +322,13 @@ def test_process_crash_releases_lock(shm_name):
     shm.close()
 
 
+@pytest.mark.skipif(
+    WINDOWS_SHARED_MEMORY_IS_EPHEMERAL,
+    reason=(
+        "Windows destroys named shared memory when the last handle closes, "
+        "so a segment cannot outlive its creator when no other handle is open"
+    ),
+)
 def test_creator_exit_leaves_shared_memory_usable(shm_name):
     context = mp.get_context("spawn")
     event = context.Event()
@@ -370,6 +379,13 @@ def test_reentrant_acquire_requires_balanced_release(shm_name):
     shm.close()
 
 
+@pytest.mark.skipif(
+    WINDOWS_SHARED_MEMORY_IS_EPHEMERAL,
+    reason=(
+        "Windows destroys named shared memory when the last handle closes, "
+        "so close-then-reopen is not possible without another live handle"
+    ),
+)
 def test_close_and_reopen_preserves_repr_and_metadata(shm_name):
     writer = pyshmem.create(shm_name, shape=(3, 3), dtype=np.float32)
     writer.write(np.ones((3, 3), dtype=np.float32))

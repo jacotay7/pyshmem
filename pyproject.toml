@@ -5,10 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pyshmem"
 version = "0.1.0"
-description = "Unified CPU/GPU shared memory primitives for Python."
+description = "Shared-memory streams for NumPy and CUDA-backed PyTorch pipelines."
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.9"
-license = "MIT"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
 authors = [
     { name = "Jacob Taylor" },
 ]
@@ -18,25 +19,43 @@ dependencies = [
 ]
 keywords = ["shared-memory", "numpy", "torch", "gpu", "cuda"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
     "Topic :: System :: Distributed Computing",
 ]
+
+[project.urls]
+Homepage = "https://github.com/jacotay7/pyshare"
+Documentation = "https://pyshare.readthedocs.io/"
+Repository = "https://github.com/jacotay7/pyshare"
+Issues = "https://github.com/jacotay7/pyshare/issues"
+Changelog = "https://github.com/jacotay7/pyshare/releases"
 
 [project.optional-dependencies]
 test = [
     "pytest>=8.3",
     "pytest-cov>=5",
     "ruff>=0.11",
+    "build>=1.2",
+    "twine>=5.1",
 ]
 gpu = [
     "torch>=2.2",
+]
+docs = [
+    "sphinx>=8.2",
+    "furo>=2024.8.6",
+    "myst-parser>=4.0",
 ]
 
 [tool.setuptools]
