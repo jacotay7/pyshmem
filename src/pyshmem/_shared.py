@@ -1,6 +1,6 @@
 """Shared-memory primitives for CPU NumPy arrays and optional CUDA tensors.
 
-The public API exposed through :mod:`pyshare` is intentionally small:
+The public API exposed through :mod:`pyshmem` is intentionally small:
 
 - :func:`create` creates a named shared-memory stream
 - :func:`open` attaches to an existing stream
@@ -806,7 +806,7 @@ class SharedMemory:
             raise RuntimeError(
                 "cannot clear GPU shared memory without a GPU attachment; "
                 "reopen it with "
-                f"pyshare.open({self.name!r}, gpu_device='cuda:N')"
+                f"pyshmem.open({self.name!r}, gpu_device='cuda:N')"
             )
         with self.locked():
             self._mark_write_started()
@@ -842,7 +842,7 @@ class SharedMemory:
             raise RuntimeError(
                 "cannot write to GPU shared memory without a GPU attachment; "
                 "reopen it with "
-                f"pyshare.open({self.name!r}, gpu_device='cuda:N')"
+                f"pyshmem.open({self.name!r}, gpu_device='cuda:N')"
             )
         else:
             array = np.asarray(value, dtype=self.dtype)
@@ -884,7 +884,7 @@ class SharedMemory:
                 raise RuntimeError(
                     "GPU shared memory was created without cpu_mirror=True; "
                     "reopen it with "
-                    f"pyshare.open({self.name!r}, gpu_device='cuda:N')"
+                    f"pyshmem.open({self.name!r}, gpu_device='cuda:N')"
                 )
             return self._array
 
@@ -894,7 +894,7 @@ class SharedMemory:
             raise RuntimeError(
                 "GPU shared memory was created without cpu_mirror=True; "
                 "reopen it with "
-                f"pyshare.open({self.name!r}, gpu_device='cuda:N')"
+                f"pyshmem.open({self.name!r}, gpu_device='cuda:N')"
             )
         return self._read_consistent_cpu(poll_interval)
 

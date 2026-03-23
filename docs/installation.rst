@@ -8,7 +8,7 @@ Install the core package with:
 
 .. code-block:: bash
 
-   pip install pyshare
+   pip install pyshmem
 
 For local development from a checkout:
 
@@ -48,5 +48,5 @@ To confirm GPU availability inside your environment:
 
 .. code-block:: python
 
-   import pyshare
-   print(pyshare.gpu_available())
+   import pyshmem
+   print(pyshmem.gpu_available())

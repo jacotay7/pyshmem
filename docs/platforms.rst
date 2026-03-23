@@ -18,7 +18,7 @@ closed.
 Consequences:
 
 - a segment cannot outlive its creator if no other handle remains open
-- ``close()`` followed by ``pyshare.open(...)`` fails if that close call dropped
+- ``close()`` followed by ``pyshmem.open(...)`` fails if that close call dropped
   the final live handle
 
-This is an operating-system behavior, not a pyshare-specific policy.
+This is an operating-system behavior, not a pyshmem-specific policy.

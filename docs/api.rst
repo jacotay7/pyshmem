@@ -4,22 +4,22 @@ API Reference
 Top-level package
 -----------------
 
-.. automodule:: pyshare
+.. automodule:: pyshmem
 
 SharedMemory
 ------------
 
-.. autoclass:: pyshare.SharedMemory
+.. autoclass:: pyshmem.SharedMemory
    :members:
    :member-order: bysource
 
 Factory functions
 -----------------
 
-.. autofunction:: pyshare.create
+.. autofunction:: pyshmem.create
 
-.. autofunction:: pyshare.open
+.. autofunction:: pyshmem.open
 
-.. autofunction:: pyshare.unlink
+.. autofunction:: pyshmem.unlink
 
-.. autofunction:: pyshare.gpu_available
+.. autofunction:: pyshmem.gpu_available

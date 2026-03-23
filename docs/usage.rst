@@ -7,10 +7,10 @@ CPU stream quickstart
 .. code-block:: python
 
    import numpy as np
-   import pyshare
+   import pyshmem
 
-   writer = pyshare.create("frames", shape=(480, 640), dtype=np.float32)
-   reader = pyshare.open("frames")
+   writer = pyshmem.create("frames", shape=(480, 640), dtype=np.float32)
+   reader = pyshmem.open("frames")
 
    writer.write(np.ones((480, 640), dtype=np.float32))
    frame = reader.read()
@@ -21,15 +21,15 @@ GPU stream quickstart
 .. code-block:: python
 
    import numpy as np
-   import pyshare
+   import pyshmem
 
-   writer = pyshare.create(
+   writer = pyshmem.create(
        "activations",
        shape=(1024, 1024),
        dtype=np.float32,
        gpu_device="cuda:0",
    )
-   reader = pyshare.open("activations", gpu_device="cuda:0")
+   reader = pyshmem.open("activations", gpu_device="cuda:0")
 
    writer.write(np.ones((1024, 1024), dtype=np.float32))
    activation = reader.read()

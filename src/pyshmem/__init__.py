@@ -1,6 +1,6 @@
-"""Public package surface for pyshare."""
+"""Public package surface for pyshmem."""
 
-from pyshare._shared import SharedMemory, create, gpu_available, open, unlink
+from pyshmem._shared import SharedMemory, create, gpu_available, open, unlink
 
 __version__ = "1.0.0"
 

@@ -8,7 +8,7 @@ Creating a GPU stream
 
 .. code-block:: python
 
-   shm = pyshare.create(
+   shm = pyshmem.create(
        "weights",
        shape=(4096, 4096),
        dtype=np.float32,
@@ -37,7 +37,7 @@ Set ``cpu_mirror=True`` when you need CPU-side reopen or CPU-side payload reads.
 
 .. code-block:: python
 
-   shm = pyshare.create(
+   shm = pyshmem.create(
        "weights",
        shape=(4096, 4096),
        dtype=np.float32,
@@ -55,6 +55,6 @@ Always pass ``gpu_device`` when you want a CUDA tensor view:
 
 .. code-block:: python
 
-   reader = pyshare.open("weights", gpu_device="cuda:0")
+   reader = pyshmem.open("weights", gpu_device="cuda:0")
 
 If you omit ``gpu_device``, the handle remains CPU-only.

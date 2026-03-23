@@ -1,7 +1,7 @@
 Overview
 ========
 
-pyshare gives you a single interface for two related use cases:
+pyshmem gives you a single interface for two related use cases:
 
 - CPU shared-memory streams backed by NumPy arrays
 - GPU shared-memory streams backed by CUDA tensors through PyTorch
@@ -24,11 +24,11 @@ Public API
 
 The public package surface is intentionally small:
 
-- ``pyshare.create``
-- ``pyshare.open``
-- ``pyshare.unlink``
-- ``pyshare.gpu_available``
-- ``pyshare.SharedMemory``
+- ``pyshmem.create``
+- ``pyshmem.open``
+- ``pyshmem.unlink``
+- ``pyshmem.gpu_available``
+- ``pyshmem.SharedMemory``
 
 If you are starting fresh, the best path is to read :doc:`installation` and
 then :doc:`usage`.

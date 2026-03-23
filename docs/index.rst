@@ -1,7 +1,7 @@
-pyshare documentation
+pyshmem documentation
 =====================
 
-pyshare provides named shared-memory streams for CPU NumPy arrays and optional
+pyshmem provides named shared-memory streams for CPU NumPy arrays and optional
 CUDA-backed PyTorch pipelines. The library is designed for applications that
 need low-latency data exchange between processes while preserving a simple,
 uniform API.

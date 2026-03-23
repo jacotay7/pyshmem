@@ -1,15 +1,15 @@
 # pyshmem
 
-[PyPI](https://pypi.org/project/pyshare/) | [Documentation](https://pyshare.readthedocs.io/) | [Source](https://github.com/jacotay7/pyshare) | [Issues](https://github.com/jacotay7/pyshare/issues)
+[PyPI](https://pypi.org/project/pyshmem/) | [Documentation](https://pyshmem.readthedocs.io/) | [Source](https://github.com/jacotay7/pyshmem) | [Issues](https://github.com/jacotay7/pyshmem/issues)
 
-pyshare provides named shared-memory streams for NumPy arrays and optional
+pyshmem provides named shared-memory streams for NumPy arrays and optional
 CUDA-backed PyTorch pipelines.
 
 It is designed for applications that need a small, predictable API for moving
 numeric payloads between processes without rebuilding the same locking,
 metadata, and lifecycle rules around raw shared memory.
 
-## Why pyshare
+## Why pyshmem
 
 - one API for CPU NumPy buffers and CUDA-backed tensors
 - cross-process write locking with explicit lock ownership
@@ -22,15 +22,15 @@ metadata, and lifecycle rules around raw shared memory.
 Install from PyPI:
 
 ```bash
-pip install pyshare
+pip install pyshmem
 ```
 
 Optional extras:
 
 ```bash
-pip install pyshare[test]
-pip install pyshare[gpu]
-pip install pyshare[docs]
+pip install pyshmem[test]
+pip install pyshmem[gpu]
+pip install pyshmem[docs]
 ```
 
 For local development from a checkout:
@@ -45,10 +45,10 @@ pip install -e .[test]
 
 ```python
 import numpy as np
-import pyshare
+import pyshmem
 
-writer = pyshare.create("demo_frame", shape=(4, 4), dtype=np.float32)
-reader = pyshare.open("demo_frame")
+writer = pyshmem.create("demo_frame", shape=(4, 4), dtype=np.float32)
+reader = pyshmem.open("demo_frame")
 
 writer.write(np.ones((4, 4), dtype=np.float32))
 frame = reader.read()
@@ -61,7 +61,7 @@ next_frame = reader.read_new(timeout=1.0)
 import numpy as np
 import pyshmem
 
-writer = pyshare.create(
+writer = pyshmem.create(
     "demo_cuda",
     shape=(4, 4),
     dtype=np.float32,
@@ -69,17 +69,17 @@ writer = pyshare.create(
 )
 writer.write(np.ones((4, 4), dtype=np.float32))
 
-reader = pyshare.open("demo_cuda", gpu_device="cuda:0")
+reader = pyshmem.open("demo_cuda", gpu_device="cuda:0")
 frame = reader.read()
 ```
 
 ## Public API
 
-- `pyshare.SharedMemory`
-- `pyshare.create(name, *, shape, dtype=np.float32, size=None, gpu_device=None, cpu_mirror=None)`
-- `pyshare.open(name, *, gpu_device=None)`
-- `pyshare.unlink(name)`
-- `pyshare.gpu_available()`
+- `pyshmem.SharedMemory`
+- `pyshmem.create(name, *, shape, dtype=np.float32, size=None, gpu_device=None, cpu_mirror=None)`
+- `pyshmem.open(name, *, gpu_device=None)`
+- `pyshmem.unlink(name)`
+- `pyshmem.gpu_available()`
 
 `SharedMemory` instances expose metadata, locking, lifecycle, and IO methods:
 
@@ -109,8 +109,8 @@ Closed handles are guarded explicitly. After `close()`, methods such as
 `read`, `write`, `acquire`, `clear`, and metadata access raise a `RuntimeError`
 that instructs the caller to reopen the stream.
 
-Missing segments raise `FileNotFoundError` with a pyshare-specific message that
-points the caller toward `pyshare.create(...)`.
+Missing segments raise `FileNotFoundError` with a pyshmem-specific message that
+points the caller toward `pyshmem.create(...)`.
 
 ## GPU Modes
 
@@ -118,18 +118,18 @@ GPU-backed streams have two deliberately different operating modes.
 
 Performance mode:
 
-- `pyshare.create(..., gpu_device="cuda:N")` defaults to `cpu_mirror=False`
+- `pyshmem.create(..., gpu_device="cuda:N")` defaults to `cpu_mirror=False`
 - avoids CPU mirror maintenance on every write
 - optimized for GPU-heavy pipelines where throughput matters most
 
 Compatibility mode:
 
-- `pyshare.create(..., gpu_device="cuda:N", cpu_mirror=True)` keeps the CPU mirror updated
+- `pyshmem.create(..., gpu_device="cuda:N", cpu_mirror=True)` keeps the CPU mirror updated
 - allows CPU-side payload reads and stronger safe-snapshot semantics under concurrent writes
 
 Important attachment rule:
 
-- pass `gpu_device="cuda:N"` to `pyshare.open(...)` whenever the caller needs a CUDA `torch.Tensor` view
+- pass `gpu_device="cuda:N"` to `pyshmem.open(...)` whenever the caller needs a CUDA `torch.Tensor` view
 - opening a GPU stream without `gpu_device` still allows metadata inspection and lock management, but payload reads require either a GPU attachment or `cpu_mirror=True`
 
 ## Platform Notes
@@ -143,7 +143,7 @@ is closed.
 That means the following behaviors are unsupported on Windows:
 
 - a segment outliving its creator when no other process still has it open
-- `close()` followed by `pyshare.open(...)` when that `close()` dropped the final live handle
+- `close()` followed by `pyshmem.open(...)` when that `close()` dropped the final live handle
 
 Those behaviors remain supported on POSIX platforms.
 

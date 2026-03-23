@@ -35,11 +35,11 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jacotay7/pyshare"
-Documentation = "https://pyshare.readthedocs.io/"
-Repository = "https://github.com/jacotay7/pyshare"
-Issues = "https://github.com/jacotay7/pyshare/issues"
-Changelog = "https://github.com/jacotay7/pyshare/releases"
+Homepage = "https://github.com/jacotay7/pyshmem"
+Documentation = "https://pyshmem.readthedocs.io/"
+Repository = "https://github.com/jacotay7/pyshmem"
+Issues = "https://github.com/jacotay7/pyshmem/issues"
+Changelog = "https://github.com/jacotay7/pyshmem/releases"
 
 [project.optional-dependencies]
 test = [

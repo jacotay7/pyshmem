@@ -1,7 +1,7 @@
 Benchmarks
 ==========
 
-pyshare includes benchmark-marked tests for both round-trip IO and matrix-vector
+pyshmem includes benchmark-marked tests for both round-trip IO and matrix-vector
 multiply pipeline workloads.
 
 Running benchmarks locally
@@ -30,12 +30,12 @@ Two GPU MVM benchmark shapes are included:
 Environment knobs
 -----------------
 
-- ``PYSHARE_MVM_DIM``
-- ``PYSHARE_CPU_MVM_ITERATIONS``
-- ``PYSHARE_GPU_MVM_ITERATIONS``
-- ``PYSHARE_GPU_DEVICE_MVM_DIM``
-- ``PYSHARE_GPU_DEVICE_MVM_ITERATIONS``
-- ``PYSHARE_GPU_DEVICE_MVM_WARMUP_ITERATIONS``
+- ``pyshmem_MVM_DIM``
+- ``pyshmem_CPU_MVM_ITERATIONS``
+- ``pyshmem_GPU_MVM_ITERATIONS``
+- ``pyshmem_GPU_DEVICE_MVM_DIM``
+- ``pyshmem_GPU_DEVICE_MVM_ITERATIONS``
+- ``pyshmem_GPU_DEVICE_MVM_WARMUP_ITERATIONS``
 
 See the project README for the current measured results captured on the primary
 development machine.

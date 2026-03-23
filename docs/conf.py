@@ -8,7 +8,7 @@ ROOT = os.path.abspath("..")
 SRC = os.path.join(ROOT, "src")
 sys.path.insert(0, SRC)
 
-project = "pyshare"
+project = "pyshmem"
 author = "Jacob Taylor"
 copyright = "2026, Jacob Taylor"
 release = "1.0.0"
@@ -30,7 +30,7 @@ autodoc_typehints = "description"
 autoclass_content = "class"
 
 html_theme = "furo"
-html_title = "pyshare documentation"
+html_title = "pyshmem documentation"
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
