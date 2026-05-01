@@ -11,7 +11,7 @@ sys.path.insert(0, SRC)
 project = "pyshmem"
 author = "Jacob Taylor"
 copyright = "2026, Jacob Taylor"
-release = "1.0.0"
+release = "1.0.1"
 
 extensions = [
     "myst_parser",
