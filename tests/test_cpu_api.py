@@ -246,7 +246,7 @@ def test_attached_process_exit_keeps_stream_attachable(shm_name):
     writer.close()
 
 
-def test_unregister_uses_exact_shared_memory_internal_name(monkeypatch):
+def test_unregister_uses_platform_expected_shared_memory_name(monkeypatch):
     calls: list[tuple[str, str]] = []
 
     def fake_unregister(name: str, rtype: str) -> None:
@@ -260,7 +260,10 @@ def test_unregister_uses_exact_shared_memory_internal_name(monkeypatch):
 
     pyshmem_shared._unregister(shm)
 
-    assert calls == [("/ps_test_meta", "shared_memory")]
+    if os.name == "nt":
+        assert calls == []
+    else:
+        assert calls == [("/ps_test_meta", "shared_memory")]
 
 
 def test_cross_process_lock_blocks_explicit_acquire_until_release(shm_name):
