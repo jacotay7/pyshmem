@@ -188,11 +188,53 @@ def _release_file_lock(file_handle) -> None:
 
 
 def _unregister(shm: shared_memory.SharedMemory) -> None:
-    if os.name == "nt" or sys.platform == "darwin":
+    if os.name == "nt":
         return
+    name = getattr(shm, "_name", None)
+    if not name:
+        return
+    candidates = [name]
+    if name.startswith("/"):
+        candidates.append(name[1:])
+    else:
+        candidates.append(f"/{name}")
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            resource_tracker.unregister(candidate, "shared_memory")
+        except Exception:
+            continue
+        return
+
+
+def _can_directly_unlink_posix_segments() -> bool:
+    return bool(
+        os.name != "nt"
+        and hasattr(shared_memory, "_posixshmem")
+        and hasattr(shared_memory._posixshmem, "shm_unlink")
+    )
+
+
+def _normalize_segment_name(name: str) -> str:
+    return name if name.startswith("/") else f"/{name}"
+
+
+def _safe_posix_shm_unlink(name: str) -> None:
     try:
-        resource_tracker.unregister(shm._name, "shared_memory")
-    except Exception:
+        shared_memory._posixshmem.shm_unlink(_normalize_segment_name(name))
+    except FileNotFoundError:
+        pass
+
+
+def _safe_remove(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
         pass
 
 
@@ -311,6 +353,15 @@ def _duplicate_name_error(name: str) -> FileExistsError:
 
 def unlink(name: str) -> None:
     _LOCAL_GPU_TENSORS.pop(name, None)
+    if _can_directly_unlink_posix_segments():
+        for segment_name in (
+            _data_name(name),
+            _metadata_name(name),
+            _gpu_handle_name(name),
+        ):
+            _safe_posix_shm_unlink(segment_name)
+        _safe_remove(_lock_path(name))
+        return
     for segment_name in (
         _data_name(name),
         _metadata_name(name),
@@ -328,12 +379,7 @@ def unlink(name: str) -> None:
                 shm.close()
             except Exception:
                 pass
-    try:
-        os.remove(_lock_path(name))
-    except FileNotFoundError:
-        pass
-    except OSError:
-        pass
+    _safe_remove(_lock_path(name))
 
 
 class SharedMemory:

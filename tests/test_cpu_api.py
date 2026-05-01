@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+from pathlib import Path
+import subprocess
 import sys
 import threading
 import time
@@ -14,6 +16,23 @@ import pyshmem
 
 pytestmark = pytest.mark.cpu
 WINDOWS_SHARED_MEMORY_IS_EPHEMERAL = sys.platform == "win32"
+TEST_SRC_PATH = str(Path(__file__).resolve().parents[1] / "src")
+
+
+def _run_python_child(code: str) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    pythonpath = env.get("PYTHONPATH")
+    if pythonpath:
+        env["PYTHONPATH"] = os.pathsep.join((TEST_SRC_PATH, pythonpath))
+    else:
+        env["PYTHONPATH"] = TEST_SRC_PATH
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def _read_cpu_payload(name: str, queue) -> None:
@@ -193,6 +212,35 @@ def test_cpu_stream_can_be_opened_in_another_process(shm_name):
     assert message["size"] == payload.nbytes
     assert message["values"] == payload.tolist()
 
+    writer.close()
+
+
+@pytest.mark.skipif(
+    WINDOWS_SHARED_MEMORY_IS_EPHEMERAL,
+    reason=(
+        "Windows destroys named shared memory when the last handle closes, "
+        "so attach persistence after another process exits is not meaningful"
+    ),
+)
+def test_attached_process_exit_keeps_stream_attachable(shm_name):
+    writer = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    payload = np.array([1.0, 2.0], dtype=np.float32)
+    writer.write(payload)
+
+    child = _run_python_child(
+        "import pyshmem; "
+        f"shm = pyshmem.open({shm_name!r}); "
+        "print(shm.read().tolist())"
+    )
+
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip() == str(payload.tolist())
+    assert "resource_tracker" not in child.stderr
+
+    reopened = pyshmem.open(shm_name)
+    np.testing.assert_array_equal(reopened.read(), payload)
+
+    reopened.close()
     writer.close()
 
 
