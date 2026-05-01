@@ -252,7 +252,9 @@ def test_unregister_uses_exact_shared_memory_internal_name(monkeypatch):
     def fake_unregister(name: str, rtype: str) -> None:
         calls.append((name, rtype))
 
-    monkeypatch.setattr(pyshmem_shared.resource_tracker, "unregister", fake_unregister)
+    monkeypatch.setattr(
+        pyshmem_shared.resource_tracker, "unregister", fake_unregister
+    )
 
     shm = types.SimpleNamespace(_name="/ps_test_meta")
 
