@@ -3,6 +3,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 from pathlib import Path
+import types
 import subprocess
 import sys
 import threading
@@ -12,6 +13,7 @@ import numpy as np
 import pytest
 
 import pyshmem
+import pyshmem._shared as pyshmem_shared
 
 
 pytestmark = pytest.mark.cpu
@@ -242,6 +244,21 @@ def test_attached_process_exit_keeps_stream_attachable(shm_name):
 
     reopened.close()
     writer.close()
+
+
+def test_unregister_uses_exact_shared_memory_internal_name(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    def fake_unregister(name: str, rtype: str) -> None:
+        calls.append((name, rtype))
+
+    monkeypatch.setattr(pyshmem_shared.resource_tracker, "unregister", fake_unregister)
+
+    shm = types.SimpleNamespace(_name="/ps_test_meta")
+
+    pyshmem_shared._unregister(shm)
+
+    assert calls == [("/ps_test_meta", "shared_memory")]
 
 
 def test_cross_process_lock_blocks_explicit_acquire_until_release(shm_name):

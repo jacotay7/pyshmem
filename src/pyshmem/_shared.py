@@ -192,21 +192,10 @@ def _unregister(shm: shared_memory.SharedMemory) -> None:
     name = getattr(shm, "_name", None)
     if not name:
         return
-    candidates = [name]
-    if name.startswith("/"):
-        candidates.append(name[1:])
-    else:
-        candidates.append(f"/{name}")
-    seen: set[str] = set()
-    for candidate in candidates:
-        if not candidate or candidate in seen:
-            continue
-        seen.add(candidate)
-        try:
-            resource_tracker.unregister(candidate, "shared_memory")
-        except Exception:
-            continue
-        return
+    try:
+        resource_tracker.unregister(name, "shared_memory")
+    except Exception:
+        pass
 
 
 def _can_directly_unlink_posix_segments() -> bool:
