@@ -2,7 +2,7 @@
 
 from pyshmem._shared import SharedMemory, create, gpu_available, open, unlink
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 __all__ = [
     "SharedMemory",
