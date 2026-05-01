@@ -19,7 +19,6 @@ import builtins
 from contextlib import contextmanager
 import os
 import pickle
-import sys
 import tempfile
 import threading
 import time
@@ -286,9 +285,7 @@ def _normalize_size(
             "size does not match shape and dtype: "
             f"expected {expected}, got {size}"
         )
-        raise ValueError(
-            message
-        )
+        raise ValueError(message)
     return expected
 
 
@@ -395,6 +392,7 @@ class SharedMemory:
     metadata and take locks, but they cannot read the payload without
     reopening with a CUDA attachment.
     """
+
     def __init__(
         self,
         *,
@@ -880,8 +878,7 @@ class SharedMemory:
             )
             if tuple(tensor.shape) != self.shape:
                 message = (
-                    f"expected shape {self.shape}, "
-                    f"got {tuple(tensor.shape)}"
+                    f"expected shape {self.shape}, got {tuple(tensor.shape)}"
                 )
                 raise ValueError(message)
         elif self.gpu_enabled and not self.cpu_mirror:
@@ -894,8 +891,7 @@ class SharedMemory:
             array = np.asarray(value, dtype=self.dtype)
             if tuple(array.shape) != self.shape:
                 message = (
-                    f"expected shape {self.shape}, "
-                    f"got {tuple(array.shape)}"
+                    f"expected shape {self.shape}, got {tuple(array.shape)}"
                 )
                 raise ValueError(message)
 

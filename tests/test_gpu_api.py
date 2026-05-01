@@ -208,9 +208,7 @@ def test_read_new_waits_for_next_write(shm_name):
     thread.join()
 
     assert elapsed >= 0.04
-    assert torch.equal(
-        received.cpu(), torch.ones((2, 2), dtype=torch.float32)
-    )
+    assert torch.equal(received.cpu(), torch.ones((2, 2), dtype=torch.float32))
 
     reader.close()
     writer.close()

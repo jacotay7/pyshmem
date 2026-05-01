@@ -36,8 +36,7 @@ def _record_rate(
     rate_hz = iterations / elapsed
     record_property(property_name, rate_hz)
     print(
-        f"{label}: {rate_hz:.1f} Hz "
-        f"({elapsed * 1e3 / iterations:.3f} ms/op)"
+        f"{label}: {rate_hz:.1f} Hz ({elapsed * 1e3 / iterations:.3f} ms/op)"
     )
     return rate_hz
 
