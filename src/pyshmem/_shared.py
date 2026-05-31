@@ -49,32 +49,19 @@ DTYPE_TABLE = (
     np.dtype(np.float64),
 )
 DTYPE_TO_CODE = {dtype: index for index, dtype in enumerate(DTYPE_TABLE)}
-TORCH_DTYPE_MAP = {
-    np.dtype(np.float16): getattr(torch, "float16", None)
-    if torch is not None
-    else None,
-    np.dtype(np.float32): getattr(torch, "float32", None)
-    if torch is not None
-    else None,
-    np.dtype(np.float64): getattr(torch, "float64", None)
-    if torch is not None
-    else None,
-    np.dtype(np.int8): getattr(torch, "int8", None)
-    if torch is not None
-    else None,
-    np.dtype(np.int16): getattr(torch, "int16", None)
-    if torch is not None
-    else None,
-    np.dtype(np.int32): getattr(torch, "int32", None)
-    if torch is not None
-    else None,
-    np.dtype(np.int64): getattr(torch, "int64", None)
-    if torch is not None
-    else None,
-    np.dtype(np.uint8): getattr(torch, "uint8", None)
-    if torch is not None
-    else None,
-}
+if torch is not None:
+    TORCH_DTYPE_MAP = {
+        np.dtype(np.float16): torch.float16,
+        np.dtype(np.float32): torch.float32,
+        np.dtype(np.float64): torch.float64,
+        np.dtype(np.int8): torch.int8,
+        np.dtype(np.int16): torch.int16,
+        np.dtype(np.int32): torch.int32,
+        np.dtype(np.int64): torch.int64,
+        np.dtype(np.uint8): torch.uint8,
+    }
+else:
+    TORCH_DTYPE_MAP = {}
 
 METADATA_VERSION = 2
 METADATA_INDEX_VERSION = 0
@@ -308,8 +295,10 @@ def _normalize_gpu_device(gpu_device: str | int | None) -> Any | None:
 def _torch_dtype_for(dtype: np.dtype):
     torch_dtype = TORCH_DTYPE_MAP.get(np.dtype(dtype))
     if torch_dtype is None:
+        _supported = ", ".join(str(d) for d in TORCH_DTYPE_MAP)
         raise ValueError(
-            f"dtype {dtype} is not supported for GPU shared memory"
+            f"dtype {dtype} is not supported for GPU shared memory; "
+            f"supported: {_supported}"
         )
     return torch_dtype
 
@@ -467,7 +456,7 @@ class SharedMemory:
             time.sleep(poll_interval)
 
     def _finish_write(self) -> None:
-        self._metadata[METADATA_INDEX_COUNT] = self.count + 1
+        self._metadata[METADATA_INDEX_COUNT] += 1
         self._metadata[METADATA_INDEX_WRITE_TIME] = time.time()
         self._metadata[METADATA_INDEX_WRITE_SEQUENCE] += 1
 
