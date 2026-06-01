@@ -562,3 +562,194 @@ def test_create_reports_clear_error_for_existing_name(shm_name):
     assert f"use pyshmem.open({shm_name!r})" in str(exc_info.value)
 
     writer.close()
+
+
+# ---------------------------------------------------------------------------
+# GPU handle segment leak fix (#2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_create_removes_gpu_tensor_cache_entry_on_post_creation_failure(
+    shm_name, monkeypatch
+):
+    """If _create raises after _create_gpu_tensor_and_handle, the tensor
+    weakref must be removed from _LOCAL_GPU_TENSORS so no stale entry remains.
+    """
+    import pyshmem._shared as pyshmem_shared
+
+    original_create_gpu = pyshmem_shared._create_gpu_tensor_and_handle
+
+    def patched_create_gpu(*, name, shape, torch_dtype, gpu_device):
+        result = original_create_gpu(
+            name=name,
+            shape=shape,
+            torch_dtype=torch_dtype,
+            gpu_device=gpu_device,
+        )
+        # At this point _cache_gpu_tensor has been called.
+        assert name in pyshmem_shared._LOCAL_GPU_TENSORS
+        # Raise to simulate a subsequent failure in metadata initialisation.
+        raise RuntimeError("injected post-gpu failure")
+
+    monkeypatch.setattr(
+        pyshmem_shared, "_create_gpu_tensor_and_handle", patched_create_gpu
+    )
+
+    with pytest.raises(RuntimeError, match="injected post-gpu failure"):
+        pyshmem.create(
+            shm_name, shape=(2,), dtype=np.float32, gpu_device="cuda:0"
+        )
+
+    assert shm_name not in pyshmem_shared._LOCAL_GPU_TENSORS
+
+
+# ---------------------------------------------------------------------------
+# Thread-safety in GPU open (#1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_concurrent_gpu_opens_in_same_process_return_same_tensor(shm_name):
+    """Two threads opening the same GPU stream simultaneously must end up
+    with the same underlying GPU tensor (cache hit), not two separate tensors
+    aliasing the same CUDA IPC memory.
+    """
+    import pyshmem._shared as pyshmem_shared
+
+    creator = pyshmem.create(
+        shm_name, shape=(4,), dtype=np.float32, gpu_device="cuda:0"
+    )
+    creator.write(np.arange(4, dtype=np.float32))
+
+    handles: list[pyshmem.SharedMemory] = []
+    errors: list[str] = []
+
+    def open_and_collect() -> None:
+        try:
+            handles.append(pyshmem.open(shm_name, gpu_device="cuda:0"))
+        except Exception as exc:
+            errors.append(str(exc))
+
+    threads = [threading.Thread(target=open_and_collect) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"errors during concurrent open: {errors}"
+    assert len(handles) == 8
+
+    # All handles must agree on the data.
+    for handle in handles:
+        result = handle.read()
+        assert torch.equal(result.cpu(), torch.arange(4, dtype=torch.float32))
+        handle.close()
+
+    creator.close()
+
+
+# ---------------------------------------------------------------------------
+# write_locked on GPU streams (#8)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_write_locked_writes_payload_when_lock_held(shm_name):
+    shm = pyshmem.create(
+        shm_name, shape=(3,), dtype=np.float32, gpu_device="cuda:0"
+    )
+
+    with shm.locked():
+        shm.write_locked(np.array([7.0, 8.0, 9.0], dtype=np.float32))
+
+    received = shm.read()
+    assert torch.equal(received.cpu(), torch.tensor([7.0, 8.0, 9.0]))
+
+    shm.close()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_write_locked_raises_without_active_lock(shm_name):
+    shm = pyshmem.create(
+        shm_name, shape=(2,), dtype=np.float32, gpu_device="cuda:0"
+    )
+
+    with pytest.raises(RuntimeError, match="write_locked"):
+        shm.write_locked(np.array([1.0, 2.0], dtype=np.float32))
+
+    shm.close()
+
+
+# ---------------------------------------------------------------------------
+# describe on GPU streams (#13)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_describe_includes_gpu_fields(shm_name):
+    shm = pyshmem.create(
+        shm_name, shape=(3,), dtype=np.float32, gpu_device="cuda:0"
+    )
+    shm.write(np.ones(3, dtype=np.float32))
+
+    desc = shm.describe()
+
+    assert "gpu_enabled:  True" in desc
+    assert "cuda:0" in desc
+    assert "cpu_mirror:   False" in desc
+
+    shm.close()
+
+
+# ---------------------------------------------------------------------------
+# to_config / create_from_config on GPU streams (#16)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_to_config_includes_gpu_device_and_cpu_mirror(shm_name):
+    shm = pyshmem.create(
+        shm_name, shape=(2,), dtype=np.float32, gpu_device="cuda:0"
+    )
+
+    cfg = shm.to_config()
+
+    assert cfg["gpu_device"] == "cuda:0"
+    assert cfg["cpu_mirror"] is False
+
+    shm.close()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_create_from_config_round_trip(shm_name):
+    shm = pyshmem.create(
+        shm_name, shape=(4,), dtype=np.float32, gpu_device="cuda:0"
+    )
+    cfg = shm.to_config()
+    shm.unlink()
+
+    recreated = pyshmem.SharedMemory.create_from_config(cfg)
+
+    assert recreated.name == shm_name
+    assert recreated.shape == (4,)
+    assert recreated.dtype == np.dtype(np.float32)
+    assert recreated.gpu_device == "cuda:0"
+
+    recreated.close()
+
+
+# ---------------------------------------------------------------------------
+# stream() context manager on GPU (#6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_stream_context_manager_unlinks_on_exit(shm_name):
+    with pyshmem.stream(
+        shm_name, shape=(2,), dtype=np.float32, gpu_device="cuda:0"
+    ) as shm:
+        shm.write(np.ones(2, dtype=np.float32))
+
+    with pytest.raises(FileNotFoundError):
+        pyshmem.open(shm_name)

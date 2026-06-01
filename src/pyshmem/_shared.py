@@ -14,9 +14,11 @@ explicitly through the ``cpu_mirror`` argument passed to :func:`create`.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import builtins
 from contextlib import contextmanager
+import glob
 import os
 import pickle
 import tempfile
@@ -63,6 +65,17 @@ if torch is not None:
 else:
     TORCH_DTYPE_MAP = {}
 
+GPU_SUPPORTED_DTYPES: frozenset = frozenset({
+    np.dtype(np.float16),
+    np.dtype(np.float32),
+    np.dtype(np.float64),
+    np.dtype(np.int8),
+    np.dtype(np.int16),
+    np.dtype(np.int32),
+    np.dtype(np.int64),
+    np.dtype(np.uint8),
+})
+
 METADATA_VERSION = 2
 METADATA_INDEX_VERSION = 0
 METADATA_INDEX_COUNT = 1
@@ -83,6 +96,9 @@ METADATA_SIZE = 32
 _THREAD_LOCK_GUARD = threading.Lock()
 _THREAD_LOCKS: dict[str, "_SharedLockState"] = {}
 _LOCAL_GPU_TENSORS: dict[str, weakref.ReferenceType[Any]] = {}
+# Per-name locks for serialising GPU handle reconstruction across threads.
+_GPU_OPEN_LOCKS_GUARD = threading.Lock()
+_GPU_OPEN_LOCKS: dict[str, threading.Lock] = {}
 
 
 class _SharedLockState:
@@ -120,7 +136,14 @@ def _gpu_handle_name(name: str) -> str:
 
 
 def _lock_path(name: str) -> str:
-    directory = os.path.join(tempfile.gettempdir(), "pyshmem-locks")
+    env_dir = os.environ.get("PYSHMEM_LOCK_DIR")
+    if env_dir:
+        directory = env_dir
+    else:
+        uid = getattr(os, "getuid", lambda: 0)()
+        directory = os.path.join(
+            tempfile.gettempdir(), f"pyshmem-locks-{uid}"
+        )
     return os.path.join(directory, f"{_segment_base_name(name)}.lock")
 
 
@@ -357,6 +380,28 @@ def unlink(name: str) -> None:
     _safe_remove(_lock_path(name))
 
 
+def list_streams() -> list[str]:
+    """Return the segment base names of all existing pyshmem streams.
+
+    On Linux, scans ``/dev/shm/`` for ``ps_*`` data-segment files.  Returns
+    segment identifiers such as ``"ps_abcdef1234567"``; these are the hashed
+    names, not the user-visible names passed to :func:`create`.  Returns an
+    empty list on platforms where the scan is not supported.
+    """
+    if os.name == "nt":
+        return []
+    shm_dir = "/dev/shm"
+    if not os.path.isdir(shm_dir):
+        return []
+    result = []
+    for path in glob.glob(os.path.join(shm_dir, "ps_*")):
+        base = os.path.basename(path)
+        if base.endswith("_meta") or base.endswith("_gpu"):
+            continue
+        result.append(base)
+    return sorted(result)
+
+
 class SharedMemory:
     """A named shared-memory stream.
 
@@ -410,6 +455,7 @@ class SharedMemory:
         self._last_seen_count = int(self._metadata[METADATA_INDEX_COUNT])
         self._lock_state = _lock_state(name)
         self._closed = False
+        self._auto_unlink = False
 
     def __repr__(self) -> str:
         dtype_name = str(self.dtype)
@@ -474,10 +520,14 @@ class SharedMemory:
             return
         self._metadata[METADATA_INDEX_LOCK_DEPTH] = self._lock_state.depth
 
-    def _read_consistent_cpu(self, poll_interval: float):
+    def _read_consistent_cpu(self, poll_interval: float, out=None):
         while True:
             start_sequence = self._wait_for_stable_writer(poll_interval)
-            result = np.copy(self._array)
+            if out is not None:
+                np.copyto(out, self._array)
+                result = out
+            else:
+                result = np.copy(self._array)
             end_sequence = self.write_sequence
             if start_sequence == end_sequence:
                 self._last_seen_count = self.count
@@ -673,6 +723,8 @@ class SharedMemory:
                     gpu_handle_shm.unlink()
                 except Exception:
                     pass
+            # Remove any stale weakref entry inserted by _create_gpu_tensor_and_handle.
+            _LOCAL_GPU_TENSORS.pop(name, None)
             raise
 
         return cls(
@@ -884,12 +936,23 @@ class SharedMemory:
                 np.copyto(self._array, array)
             self._finish_write()
 
-    def read(self, *, safe: bool = True, poll_interval: float = 1e-6):
+    def read(
+        self,
+        *,
+        safe: bool = True,
+        poll_interval: float = 1e-6,
+        out=None,
+    ):
         """Read the current payload from the stream.
 
         When ``safe`` is ``True``, the method returns a consistent snapshot of
         the latest completed write. When ``safe`` is ``False``, the caller must
         already own the stream lock via :meth:`locked` or :meth:`acquire`.
+
+        ``out`` may be a pre-allocated NumPy array with the correct shape and
+        dtype; when supplied for CPU streams, the data is written into it
+        directly (zero-copy, no allocation).  ``out`` is ignored for GPU
+        streams and in ``safe=False`` mode.
         """
         self._ensure_open("read from")
         if not safe:
@@ -916,7 +979,7 @@ class SharedMemory:
                 "reopen it with "
                 f"pyshmem.open({self.name!r}, gpu_device='cuda:N')"
             )
-        return self._read_consistent_cpu(poll_interval)
+        return self._read_consistent_cpu(poll_interval, out=out)
 
     def read_new(
         self,
@@ -929,7 +992,10 @@ class SharedMemory:
         self._ensure_open("read from")
         baseline = self.count
         start = time.monotonic()
-        while self.count == baseline:
+        while True:
+            # Skip polling count while a write is in progress (odd sequence).
+            if self.write_sequence % 2 == 0 and self.count != baseline:
+                break
             if timeout is not None and (time.monotonic() - start) >= float(
                 timeout
             ):
@@ -939,11 +1005,133 @@ class SharedMemory:
             time.sleep(poll_interval)
         return self.read(safe=safe)
 
+    def write_locked(self, value: Any) -> None:
+        """Write a payload without acquiring the lock.
+
+        Identical to :meth:`write` but skips the internal ``with
+        self.locked()`` acquisition.  The caller must already own the lock via
+        :meth:`locked` or :meth:`acquire`.  This is the intended public
+        replacement for the private ``_mark_write_started`` / ``_finish_write``
+        pattern used in high-performance consumers such as shmpipeline.
+        """
+        self._ensure_open("write to")
+        if not self._lock_owned_by_current_thread():
+            raise RuntimeError(
+                "write_locked() requires an active 'with shm.locked()' block"
+            )
+        if self._gpu_tensor is not None:
+            tensor = torch.as_tensor(
+                value, dtype=self._torch_dtype, device=self.gpu_device
+            )
+            if tuple(tensor.shape) != self.shape:
+                raise ValueError(
+                    f"expected shape {self.shape}, got {tuple(tensor.shape)}"
+                )
+            self._mark_write_started()
+            self._gpu_tensor.copy_(tensor)
+            if self.cpu_mirror:
+                np.copyto(self._array, tensor.detach().cpu().numpy())
+            torch.cuda.synchronize(device=self.gpu_device)
+            self._finish_write()
+        elif self.gpu_enabled and not self.cpu_mirror:
+            raise RuntimeError(
+                "cannot write to GPU shared memory without a GPU attachment; "
+                "reopen it with "
+                f"pyshmem.open({self.name!r}, gpu_device='cuda:N')"
+            )
+        else:
+            array = np.asarray(value, dtype=self.dtype)
+            if tuple(array.shape) != self.shape:
+                raise ValueError(
+                    f"expected shape {self.shape}, got {tuple(array.shape)}"
+                )
+            self._mark_write_started()
+            np.copyto(self._array, array)
+            self._finish_write()
+
+    async def read_new_async(
+        self,
+        *,
+        timeout: float | None = None,
+        safe: bool = True,
+        poll_interval: float = 1e-5,
+    ):
+        """Async variant of :meth:`read_new` that yields to the event loop.
+
+        Uses :func:`asyncio.sleep` instead of :func:`time.sleep` so the
+        caller's event loop is not blocked while waiting for a new write.
+        """
+        self._ensure_open("read from")
+        baseline = self.count
+        start = time.monotonic()
+        while True:
+            if self.write_sequence % 2 == 0 and self.count != baseline:
+                break
+            if timeout is not None and (time.monotonic() - start) >= float(
+                timeout
+            ):
+                raise TimeoutError(
+                    f"timed out waiting for a new write on {self.name!r}"
+                )
+            await asyncio.sleep(poll_interval)
+        return self.read(safe=safe)
+
+    def describe(self) -> str:
+        """Return a human-readable summary of the stream's metadata."""
+        self._ensure_open("describe")
+        lines = [
+            f"name:         {self.name}",
+            f"shape:        {self.shape}",
+            f"dtype:        {self.dtype}",
+            f"size:         {self.size} bytes",
+            f"gpu_enabled:  {self.gpu_enabled}",
+            f"gpu_device:   {self.gpu_device}",
+            f"cpu_mirror:   {self.cpu_mirror}",
+            f"count:        {self.count}",
+            f"write_time:   {self.write_time}",
+            f"write_seq:    {self.write_sequence}",
+            f"owner:        {self.owner}",
+        ]
+        return "\n".join(lines)
+
+    def to_config(self) -> dict:
+        """Export stream configuration as a plain dictionary.
+
+        The returned dict can be passed to :meth:`create_from_config` to
+        recreate an identically-configured stream.
+        """
+        return {
+            "name": self.name,
+            "shape": list(self.shape),
+            "dtype": str(self.dtype),
+            "gpu_device": self.gpu_device,
+            "cpu_mirror": self.cpu_mirror,
+        }
+
+    @classmethod
+    def create_from_config(cls, config: dict) -> "SharedMemory":
+        """Create a new stream from a configuration dictionary.
+
+        Accepts dicts produced by :meth:`to_config` or hand-written configs
+        with ``name``, ``shape``, and optionally ``dtype``, ``gpu_device``,
+        and ``cpu_mirror`` keys.
+        """
+        return create(
+            config["name"],
+            shape=config["shape"],
+            dtype=config.get("dtype", "float32"),
+            gpu_device=config.get("gpu_device"),
+            cpu_mirror=config.get("cpu_mirror"),
+        )
+
     def __enter__(self) -> "SharedMemory":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self.close()
+        if self._auto_unlink:
+            self.unlink()
+        else:
+            self.close()
 
     def __del__(self) -> None:
         try:
@@ -972,52 +1160,70 @@ def _create_gpu_tensor_and_handle(
 def _open_gpu_tensor_from_handle(
     *, name: str, shape: tuple[int, ...], torch_dtype, creator_pid: int
 ):
-    if creator_pid == os.getpid():
+    # Acquire a per-name lock to serialise handle reconstruction across
+    # threads; without it two threads could both find an empty cache and
+    # independently reconstruct tensors from the same IPC handle, producing
+    # two GPU tensors aliasing the same CUDA memory.
+    with _GPU_OPEN_LOCKS_GUARD:
+        if name not in _GPU_OPEN_LOCKS:
+            _GPU_OPEN_LOCKS[name] = threading.Lock()
+        name_lock = _GPU_OPEN_LOCKS[name]
+
+    with name_lock:
+        if creator_pid == os.getpid():
+            gpu_tensor = _get_cached_gpu_tensor(name)
+            if gpu_tensor is None:
+                raise RuntimeError(
+                    "cannot reopen GPU shared memory in the creator process "
+                    "after all local GPU handles have been released"
+                )
+            return gpu_tensor, None
+
+        # Non-creator path: check the cache first (another thread may have
+        # already reconstructed the tensor while we waited for the lock).
         gpu_tensor = _get_cached_gpu_tensor(name)
-        if gpu_tensor is None:
-            raise RuntimeError(
-                "cannot reopen GPU shared memory in the creator process "
-                "after all local GPU handles have been released"
-            )
-        return gpu_tensor, None
+        if gpu_tensor is not None:
+            return gpu_tensor, None
 
-    handle_shm = shared_memory.SharedMemory(name=_gpu_handle_name(name))
-    _unregister(handle_shm)
-    (
-        device_index,
-        handle_bytes,
-        storage_size_bytes,
-        storage_offset_bytes,
-        ref_counter_handle,
-        ref_counter_offset,
-        event_handle,
-        event_sync_required,
-    ) = pickle.loads(bytes(handle_shm.buf))
+        handle_shm = shared_memory.SharedMemory(
+            name=_gpu_handle_name(name)
+        )
+        _unregister(handle_shm)
+        (
+            device_index,
+            handle_bytes,
+            storage_size_bytes,
+            storage_offset_bytes,
+            ref_counter_handle,
+            ref_counter_offset,
+            event_handle,
+            event_sync_required,
+        ) = pickle.loads(bytes(handle_shm.buf))
 
-    torch.cuda._lazy_init()
-    storage = torch.UntypedStorage._new_shared_cuda(
-        device_index,
-        handle_bytes,
-        storage_size_bytes,
-        storage_offset_bytes,
-        ref_counter_handle,
-        ref_counter_offset,
-        event_handle,
-        event_sync_required,
-    )
-    typed_storage = torch.storage.TypedStorage(
-        wrap_storage=storage,
-        dtype=torch_dtype,
-        _internal=True,
-    )
-    tensor = torch._utils._rebuild_tensor(
-        typed_storage,
-        0,
-        shape,
-        _contiguous_stride(shape),
-    )
-    _cache_gpu_tensor(name, tensor)
-    return tensor, handle_shm
+        torch.cuda._lazy_init()
+        storage = torch.UntypedStorage._new_shared_cuda(
+            device_index,
+            handle_bytes,
+            storage_size_bytes,
+            storage_offset_bytes,
+            ref_counter_handle,
+            ref_counter_offset,
+            event_handle,
+            event_sync_required,
+        )
+        typed_storage = torch.storage.TypedStorage(
+            wrap_storage=storage,
+            dtype=torch_dtype,
+            _internal=True,
+        )
+        tensor = torch._utils._rebuild_tensor(
+            typed_storage,
+            0,
+            shape,
+            _contiguous_stride(shape),
+        )
+        _cache_gpu_tensor(name, tensor)
+        return tensor, handle_shm
 
 
 def create(
@@ -1028,6 +1234,7 @@ def create(
     size: int | None = None,
     gpu_device: str | int | None = None,
     cpu_mirror: bool | None = None,
+    auto_unlink: bool = False,
 ) -> SharedMemory:
     """Create a new named shared-memory stream.
 
@@ -1047,8 +1254,13 @@ def create(
     cpu_mirror:
         Controls whether GPU-backed streams also maintain a CPU mirror.
         Defaults to ``True`` for CPU streams and ``False`` for GPU streams.
+    auto_unlink:
+        When ``True`` the stream is destroyed (not just closed) when used as
+        a context manager.  Equivalent to calling :meth:`~SharedMemory.unlink`
+        instead of :meth:`~SharedMemory.close` on ``__exit__``.  See also the
+        :func:`stream` helper which sets this flag automatically.
     """
-    return SharedMemory._create(
+    shm = SharedMemory._create(
         name,
         shape=shape,
         dtype=dtype,
@@ -1056,8 +1268,47 @@ def create(
         gpu_device=gpu_device,
         cpu_mirror=cpu_mirror,
     )
+    shm._auto_unlink = auto_unlink
+    return shm
 
 
 def open(name: str, *, gpu_device: str | int | None = None) -> SharedMemory:
     """Attach to an existing named shared-memory stream."""
     return SharedMemory._open(name, gpu_device=gpu_device)
+
+
+@contextmanager
+def stream(
+    name: str,
+    *,
+    shape: Sequence[int],
+    dtype: Any = np.float32,
+    size: int | None = None,
+    gpu_device: str | int | None = None,
+    cpu_mirror: bool | None = None,
+):
+    """Context manager that creates a stream and unlinks it on exit.
+
+    Equivalent to ``pyshmem.create(..., auto_unlink=True)`` used as a ``with``
+    block; intended for temporary streams in tests and one-shot pipelines.
+
+    Example::
+
+        with pyshmem.stream("my_stream", shape=(100,)) as shm:
+            shm.write(data)
+            result = shm.read()
+        # stream is destroyed here
+    """
+    shm = create(
+        name,
+        shape=shape,
+        dtype=dtype,
+        size=size,
+        gpu_device=gpu_device,
+        cpu_mirror=cpu_mirror,
+        auto_unlink=True,
+    )
+    try:
+        yield shm
+    finally:
+        shm.unlink()
