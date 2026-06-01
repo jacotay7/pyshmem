@@ -349,6 +349,58 @@ def _duplicate_name_error(name: str) -> FileExistsError:
     )
 
 
+def purge() -> list[str]:
+    """Remove all pyshmem segments from shared memory.
+
+    Scans ``/dev/shm`` for all ``ps_*`` files (data, ``_meta``, and ``_gpu``
+    variants) and unlinks them, then removes any matching lock files.  Returns
+    the list of *base* segment names (no suffix) that were removed.
+
+    This is the correct tool for cleaning up after a test run or clearing a
+    machine that has accumulated stale streams.  It is *not* reversible.
+
+    Note: :func:`pyshmem list` shows hashed segment names; :func:`pyshmem
+    unlink` expects the original *user-visible* name.  Use ``purge`` when you
+    want to remove everything without knowing the original names.
+    """
+    if os.name == "nt":
+        return []
+    shm_dir = "/dev/shm"
+    if not os.path.isdir(shm_dir):
+        return []
+    all_segment_files = set()
+    for path in glob.glob(os.path.join(shm_dir, "ps_*")):
+        all_segment_files.add(os.path.basename(path))
+    if _can_directly_unlink_posix_segments():
+        for segment_name in sorted(all_segment_files):
+            _safe_posix_shm_unlink(segment_name)
+    else:
+        for segment_name in sorted(all_segment_files):
+            shm = _open_existing_segment(segment_name)
+            if shm is not None:
+                try:
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
+                finally:
+                    try:
+                        shm.close()
+                    except Exception:
+                        pass
+    uid = getattr(os, "getuid", lambda: 0)()
+    lock_dir = os.environ.get("PYSHMEM_LOCK_DIR") or os.path.join(
+        tempfile.gettempdir(), f"pyshmem-locks-{uid}"
+    )
+    for lock_path in glob.glob(os.path.join(lock_dir, "ps_*.lock")):
+        _safe_remove(lock_path)
+    _LOCAL_GPU_TENSORS.clear()
+    return sorted(
+        s
+        for s in all_segment_files
+        if not s.endswith("_meta") and not s.endswith("_gpu")
+    )
+
+
 def unlink_quiet(name: str) -> None:
     """Destroy a stream by name, silently succeeding when it does not exist.
 
