@@ -65,16 +65,18 @@ if torch is not None:
 else:
     TORCH_DTYPE_MAP = {}
 
-GPU_SUPPORTED_DTYPES: frozenset = frozenset({
-    np.dtype(np.float16),
-    np.dtype(np.float32),
-    np.dtype(np.float64),
-    np.dtype(np.int8),
-    np.dtype(np.int16),
-    np.dtype(np.int32),
-    np.dtype(np.int64),
-    np.dtype(np.uint8),
-})
+GPU_SUPPORTED_DTYPES: frozenset = frozenset(
+    {
+        np.dtype(np.float16),
+        np.dtype(np.float32),
+        np.dtype(np.float64),
+        np.dtype(np.int8),
+        np.dtype(np.int16),
+        np.dtype(np.int32),
+        np.dtype(np.int64),
+        np.dtype(np.uint8),
+    }
+)
 
 METADATA_VERSION = 2
 METADATA_INDEX_VERSION = 0
@@ -141,9 +143,7 @@ def _lock_path(name: str) -> str:
         directory = env_dir
     else:
         uid = getattr(os, "getuid", lambda: 0)()
-        directory = os.path.join(
-            tempfile.gettempdir(), f"pyshmem-locks-{uid}"
-        )
+        directory = os.path.join(tempfile.gettempdir(), f"pyshmem-locks-{uid}")
     return os.path.join(directory, f"{_segment_base_name(name)}.lock")
 
 
@@ -347,6 +347,17 @@ def _duplicate_name_error(name: str) -> FileExistsError:
         f"shared memory {name!r} already exists; "
         f"use pyshmem.open({name!r}) to attach to it"
     )
+
+
+def unlink_quiet(name: str) -> None:
+    """Destroy a stream by name, silently succeeding when it does not exist.
+
+    Identical to :func:`unlink` but explicitly documented as safe to call
+    without first checking whether the stream exists.  Useful for shutdown
+    and cleanup code that must be resilient to partially-created streams or
+    double-unlink calls.
+    """
+    unlink(name)
 
 
 def unlink(name: str) -> None:
@@ -723,7 +734,8 @@ class SharedMemory:
                     gpu_handle_shm.unlink()
                 except Exception:
                     pass
-            # Remove any stale weakref entry inserted by _create_gpu_tensor_and_handle.
+            # Remove any stale weakref entry inserted by
+            # _create_gpu_tensor_and_handle.
             _LOCAL_GPU_TENSORS.pop(name, None)
             raise
 
@@ -1185,9 +1197,7 @@ def _open_gpu_tensor_from_handle(
         if gpu_tensor is not None:
             return gpu_tensor, None
 
-        handle_shm = shared_memory.SharedMemory(
-            name=_gpu_handle_name(name)
-        )
+        handle_shm = shared_memory.SharedMemory(name=_gpu_handle_name(name))
         _unregister(handle_shm)
         (
             device_index,

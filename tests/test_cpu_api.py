@@ -502,8 +502,13 @@ def test_gpu_supported_dtypes_is_public_frozenset():
 
 def test_gpu_supported_dtypes_contains_torch_mapped_types():
     for dtype in (
-        np.float16, np.float32, np.float64,
-        np.int8, np.int16, np.int32, np.int64,
+        np.float16,
+        np.float32,
+        np.float64,
+        np.int8,
+        np.int16,
+        np.int32,
+        np.int64,
         np.uint8,
     ):
         assert np.dtype(dtype) in pyshmem.GPU_SUPPORTED_DTYPES
@@ -531,8 +536,8 @@ def test_list_streams_returns_list():
 
 
 @pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="list_streams is not supported on Windows",
+    sys.platform in ("win32", "darwin"),
+    reason="list_streams requires /dev/shm (Linux only)",
 )
 def test_list_streams_includes_data_segment_of_created_stream(shm_name):
     expected = pyshmem_shared._segment_base_name(shm_name)
@@ -590,18 +595,24 @@ def test_list_streams_returns_sorted_results(shm_name):
 
 
 def test_create_auto_unlink_true_destroys_stream_on_context_exit(shm_name):
-    with pyshmem.create(shm_name, shape=(2,), dtype=np.float32, auto_unlink=True):
+    with pyshmem.create(
+        shm_name, shape=(2,), dtype=np.float32, auto_unlink=True
+    ):
         pass
 
     with pytest.raises(FileNotFoundError):
         pyshmem.open(shm_name)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows named shared memory is freed when the last handle closes",
+)
 def test_create_auto_unlink_false_only_closes_on_context_exit(shm_name):
     with pyshmem.create(shm_name, shape=(2,), dtype=np.float32):
         pass  # auto_unlink defaults to False
 
-    # Stream should still be accessible.
+    # Stream should still be accessible (POSIX keeps it alive until unlink).
     reopened = pyshmem.open(shm_name)
     reopened.close()
 
@@ -763,7 +774,9 @@ def test_lock_path_uses_pyshmem_lock_dir_env_var(monkeypatch, tmp_path):
     assert path.startswith(custom_dir + os.sep)
 
 
-def test_stream_still_lockable_with_custom_lock_dir(shm_name, monkeypatch, tmp_path):
+def test_stream_still_lockable_with_custom_lock_dir(
+    shm_name, monkeypatch, tmp_path
+):
     custom_dir = str(tmp_path / "locks")
     monkeypatch.setenv("PYSHMEM_LOCK_DIR", custom_dir)
 
@@ -790,9 +803,17 @@ def test_describe_returns_string_containing_all_expected_fields(shm_name):
 
     assert isinstance(desc, str)
     for field in (
-        "name:", "shape:", "dtype:", "size:", "gpu_enabled:",
-        "gpu_device:", "cpu_mirror:", "count:", "write_time:",
-        "write_seq:", "owner:",
+        "name:",
+        "shape:",
+        "dtype:",
+        "size:",
+        "gpu_enabled:",
+        "gpu_device:",
+        "cpu_mirror:",
+        "count:",
+        "write_time:",
+        "write_seq:",
+        "owner:",
     ):
         assert field in desc, f"missing field {field!r}"
     assert shm_name in desc
@@ -824,7 +845,10 @@ def test_describe_raises_on_closed_stream(shm_name):
 
 
 def test_read_new_waits_for_in_progress_write_to_complete(shm_name):
-    """read_new must not return early when write_sequence is odd (write in progress)."""
+    """read_new must not return early when write_sequence is odd.
+
+    (write in progress)
+    """
     shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
     shm.write(np.zeros(2, dtype=np.float32))
 
@@ -978,6 +1002,10 @@ def test_create_from_config_write_read_round_trip(shm_name):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="CLI list requires /dev/shm (Linux only)",
+)
 def test_cli_list_shows_created_stream_segment(shm_name, capsys):
     import pyshmem._cli as cli
 

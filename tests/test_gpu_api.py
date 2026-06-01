@@ -581,7 +581,7 @@ def test_create_removes_gpu_tensor_cache_entry_on_post_creation_failure(
     original_create_gpu = pyshmem_shared._create_gpu_tensor_and_handle
 
     def patched_create_gpu(*, name, shape, torch_dtype, gpu_device):
-        result = original_create_gpu(
+        original_create_gpu(
             name=name,
             shape=shape,
             torch_dtype=torch_dtype,
@@ -615,8 +615,6 @@ def test_concurrent_gpu_opens_in_same_process_return_same_tensor(shm_name):
     with the same underlying GPU tensor (cache hit), not two separate tensors
     aliasing the same CUDA IPC memory.
     """
-    import pyshmem._shared as pyshmem_shared
-
     creator = pyshmem.create(
         shm_name, shape=(4,), dtype=np.float32, gpu_device="cuda:0"
     )

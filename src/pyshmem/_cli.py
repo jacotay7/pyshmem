@@ -33,6 +33,7 @@ def main(argv=None) -> int:
 
     if args.command == "unlink":
         import pyshmem
+
         for name in args.names:
             pyshmem.unlink(name)
             print(f"unlinked {name!r}")
@@ -40,6 +41,7 @@ def main(argv=None) -> int:
 
     if args.command == "list":
         import pyshmem
+
         streams = pyshmem.list_streams()
         if streams:
             for name in streams:

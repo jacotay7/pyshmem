@@ -9,6 +9,7 @@ from pyshmem._shared import (
     open,
     stream,
     unlink,
+    unlink_quiet,
 )
 
 __version__ = "1.0.2"
@@ -22,5 +23,6 @@ __all__ = [
     "open",
     "stream",
     "unlink",
+    "unlink_quiet",
     "__version__",
 ]

@@ -143,6 +143,17 @@ python -m pytest tests/ -m cpu -q
 python -m pytest tests/ -m gpu -q
 ```
 
+## Lint
+
+After any significant code change, run lint and auto-format before committing:
+
+```bash
+ruff check .           # must be clean (zero errors)
+ruff format .          # auto-fixes formatting; re-run check after
+```
+
+The CI lint job enforces both `ruff check` (E/W/F rules, line-length 79) and `ruff format --check`. Fix all reported issues before pushing.
+
 ## Test Coverage Policy
 
 **Every code change must be accompanied by tests.** This is non-negotiable.
