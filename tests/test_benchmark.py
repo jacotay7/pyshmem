@@ -205,6 +205,8 @@ def test_cpu_shared_memory_mvm_pipeline(shm_name, record_property):
     vector_reader.close()
     matrix_writer.close()
     vector_writer.close()
+    pyshmem.unlink(matrix_name)
+    pyshmem.unlink(vector_name)
 
 
 @pytest.mark.gpu
@@ -281,6 +283,8 @@ def test_gpu_shared_memory_mvm_pipeline(shm_name, record_property):
     vector_reader.close()
     matrix_writer.close()
     vector_writer.close()
+    pyshmem.unlink(matrix_name)
+    pyshmem.unlink(vector_name)
 
 
 @pytest.mark.gpu
@@ -366,3 +370,5 @@ def test_gpu_device_resident_mvm_pipeline(shm_name, record_property):
     vector_reader.close()
     matrix_writer.close()
     vector_writer.close()
+    pyshmem.unlink(matrix_name)
+    pyshmem.unlink(vector_name)
