@@ -21,7 +21,7 @@ Names are hashed (SHA-1, first 14 chars) to stay under the POSIX segment name li
 The metadata array stores (in order): version, write count, dtype code, ndim, size, gpu_enabled flag, device index, creator PID, write timestamp, write sequence number, lock owner PID, lock depth, cpu_mirror flag, then shape dimensions starting at index 13. `METADATA_SIZE = 32` (total slots).
 
 ### Locking model
-- Cross-process: `portalocker` file locks in `/tmp/pyshmem-locks/`
+- Cross-process: `portalocker` file locks in `/tmp/pyshmem-locks-<uid>/` (or `$PYSHMEM_LOCK_DIR`)
 - Per-thread: `threading.RLock` (re-entrant within a thread)
 - The `_lock_state(name)` function returns/creates a `_SharedLockState` that is shared across all `SharedMemory` handles opened for the same name in the same process.
 - Crash recovery: `portalocker` uses OS-level file locks that are released automatically on process exit.
@@ -46,29 +46,59 @@ import pyshmem
 shm = pyshmem.create("my_stream", shape=(100,), dtype="float32")
 shm = pyshmem.create("my_gpu_stream", shape=(100,), dtype="float32",
                       gpu_device="cuda:0", cpu_mirror=False)
+# auto-unlink on context exit
+shm = pyshmem.create("tmp", shape=(10,), auto_unlink=True)
+with pyshmem.stream("tmp2", shape=(10,)) as shm:   # always auto-unlinks
+    ...
 
 # Attach
 shm = pyshmem.open("my_stream")
 shm = pyshmem.open("my_gpu_stream", gpu_device="cuda:0")
 
+# Discover
+pyshmem.list_streams()    # returns sorted list of ps_* segment base names
+
 # Use
 shm.write(array)          # CPU: numpy array; GPU: numpy or CUDA tensor
 data = shm.read()         # returns np.ndarray (CPU) or torch.Tensor (GPU)
-data = shm.read_new(timeout=1.0)   # blocks until a new write arrives
+data = shm.read(out=buf)  # zero-alloc: writes into pre-allocated buffer
+data = shm.read_new(timeout=1.0)         # blocks until a new write arrives
+data = await shm.read_new_async(timeout=1.0)  # asyncio-safe variant
 
 # Locking (explicit)
 shm.acquire(timeout=0.5)
-shm.read(safe=False)      # zero-copy view — only valid inside lock
+shm.read(safe=False)           # zero-copy view — only valid inside lock
+shm.write_locked(value)        # write without re-acquiring lock (shmpipeline fast path)
 shm.release()
 
 # Context manager
 with shm.locked():
     shm.read(safe=False)
+    shm.write_locked(new_value)
+
+# Metadata
+shm.describe()             # human-readable summary string
+cfg = shm.to_config()      # dict: name/shape/dtype/gpu_device/cpu_mirror
+shm2 = pyshmem.SharedMemory.create_from_config(cfg)
 
 # Lifecycle
 shm.close()               # detach this handle; stream persists
 shm.unlink()              # destroy the stream entirely
 pyshmem.unlink("my_stream")
+```
+
+## Constants
+
+| Name | Description |
+|------|-------------|
+| `GPU_SUPPORTED_DTYPES` | `frozenset` of NumPy dtypes that can be used with `gpu_device=` |
+
+## CLI
+
+```bash
+pyshmem list                     # list all existing pyshmem stream segments
+pyshmem unlink my_stream         # destroy a stream by user-visible name
+pyshmem unlink stream_a stream_b # destroy multiple streams
 ```
 
 ## Key Implementation Details
@@ -90,8 +120,9 @@ Note: `uint16 uint32 uint64` are **not** supported for GPU (no PyTorch equivalen
 
 ```
 src/pyshmem/
-  __init__.py     # public surface (create, open, unlink, gpu_available)
-  _shared.py      # entire implementation (~1100 lines)
+  __init__.py     # public surface (create, open, unlink, stream, list_streams, gpu_available, GPU_SUPPORTED_DTYPES)
+  _shared.py      # entire implementation
+  _cli.py         # CLI entry point (pyshmem list / unlink)
 tests/
   conftest.py     # shm_name fixture (auto-cleanup via uuid)
   test_cpu_api.py # CPU stream tests (pytest.mark.cpu)
@@ -110,6 +141,28 @@ python -m pytest tests/ -m cpu -q
 
 # GPU only (requires CUDA)
 python -m pytest tests/ -m gpu -q
+```
+
+## Test Coverage Policy
+
+**Every code change must be accompanied by tests.** This is non-negotiable.
+
+- **New feature** → add at least one happy-path test and one error/edge-case test.
+- **Bug fix** → add a regression test that fails on the unfixed code and passes after.
+- **Correctness fix** (race condition, leak, etc.) → add a targeted test using
+  `monkeypatch` or `threading` to reproduce the scenario.
+- **Public API addition** → test all new parameters and return values, including
+  `closed` state checks if the method calls `_ensure_open`.
+
+Test placement:
+- CPU-only behaviour → `tests/test_cpu_api.py` (marked `pytest.mark.cpu`)
+- GPU-specific behaviour → `tests/test_gpu_api.py` (marked `pytest.mark.gpu`,
+  `@pytest.mark.skipif(not CUDA_AVAILABLE, ...)`)
+- Use the `shm_name` fixture for all stream names (guarantees cleanup on teardown).
+
+The CPU suite must pass at all times:
+```bash
+python -m pytest tests/test_cpu_api.py -q   # must be green before any merge
 ```
 
 ## Package Info

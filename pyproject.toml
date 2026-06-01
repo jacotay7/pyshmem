@@ -41,6 +41,9 @@ Repository = "https://github.com/jacotay7/pyshmem"
 Issues = "https://github.com/jacotay7/pyshmem/issues"
 Changelog = "https://github.com/jacotay7/pyshmem/releases"
 
+[project.scripts]
+pyshmem = "pyshmem._cli:main"
+
 [project.optional-dependencies]
 test = [
     "pytest>=8.3",

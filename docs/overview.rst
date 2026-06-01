@@ -3,32 +3,55 @@ Overview
 
 pyshmem gives you a single interface for two related use cases:
 
-- CPU shared-memory streams backed by NumPy arrays
-- GPU shared-memory streams backed by CUDA tensors through PyTorch
+- **CPU shared-memory streams** backed by NumPy arrays
+- **GPU shared-memory streams** backed by CUDA tensors through PyTorch
 
-The design goal is straightforward: move structured numeric payloads between
-processes without forcing every application to invent its own lock protocol,
-metadata layout, or CPU/GPU branching logic.
+The design goal is to move structured numeric payloads between OS processes
+without forcing every application to reinvent locking, metadata storage, or
+CPU/GPU branching logic.
 
-Core capabilities
+Core concepts
+-------------
+
+A **stream** is the only primitive pyshmem exposes.  It is a named slot in
+shared memory with a fixed shape, dtype, and storage backend.  Streams persist
+across process exits on POSIX systems and can be attached by any process that
+knows the name.
+
+Each stream is backed by up to three POSIX shared-memory segments:
+
+- a **data segment** holding the array payload
+- a **metadata segment** storing shape, dtype, write count, lock state, and
+  other bookkeeping
+- a **GPU handle segment** (GPU streams only) holding the serialised CUDA IPC
+  handle
+
+Names are hashed with SHA-1 to stay under the POSIX segment name length limit.
+
+Write consistency
 -----------------
 
-- named shared-memory streams with shape and dtype metadata
-- cross-process write locking
-- safe snapshot reads for CPU streams
-- optional CUDA-backed streams for GPU pipelines
-- explicit control over CPU mirroring for GPU streams
+Writers bracket payloads with an odd/even write-sequence counter.  Readers poll
+until the sequence is even (stable), copy the payload, then verify the sequence
+did not change mid-copy.  This provides consistent snapshots without requiring
+readers to hold the write lock.
+
+For callers that need the raw backing storage without a copy, the lock must be
+held explicitly — see :doc:`usage`.
 
 Public API
 ----------
 
 The public package surface is intentionally small:
 
-- ``pyshmem.create``
-- ``pyshmem.open``
-- ``pyshmem.unlink``
-- ``pyshmem.gpu_available``
-- ``pyshmem.SharedMemory``
+- :func:`pyshmem.create` — create a new named stream
+- :func:`pyshmem.open` — attach to an existing stream
+- :func:`pyshmem.unlink` — destroy a stream by name
+- :func:`pyshmem.stream` — context manager that creates and auto-unlinks
+- :func:`pyshmem.list_streams` — list all existing stream identifiers (Linux)
+- :func:`pyshmem.gpu_available` — check whether CUDA streams are usable
+- :data:`pyshmem.GPU_SUPPORTED_DTYPES` — dtypes accepted for GPU streams
+- :class:`pyshmem.SharedMemory` — the stream handle object
 
-If you are starting fresh, the best path is to read :doc:`installation` and
-then :doc:`usage`.
+See :doc:`api` for the full reference.  The best path for new users is to read
+:doc:`installation` and then :doc:`usage`.
