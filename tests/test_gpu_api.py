@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 import pyshmem
+import pyshmem._shared as pyshmem_shared
 
 
 torch = pytest.importorskip("torch")
@@ -52,6 +53,28 @@ def _read_gpu_payload(name: str, queue) -> None:
         }
     )
     shm.close()
+
+
+def _attach_release_worker(src_path, name, ready_q, go_q, done_q, rounds):
+    """Persistent consumer: each round, attach to the stream, read, release.
+
+    Reusing one process keeps torch imported/CUDA-initialised once so the
+    leak-regression test stays fast.  Each ``close`` releases the consumer's
+    CUDA IPC mapping, which is what lets the producer reclaim GPU memory.
+    """
+    import sys
+
+    if src_path not in sys.path:
+        sys.path.insert(0, src_path)
+    import pyshmem
+
+    ready_q.put("ready")
+    for _ in range(rounds):
+        go_q.get()
+        shm = pyshmem.open(name, gpu_device="cuda:0")
+        _ = shm.read()
+        shm.close()
+        done_q.put("released")
 
 
 def _hold_lock(name: str, queue, hold_seconds: float) -> None:
@@ -108,28 +131,31 @@ def test_create_write_read_round_trip_gpu(shm_name):
 
 
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
-def test_gpu_stream_without_cpu_mirror_requires_gpu_attachment_for_reads(
-    shm_name,
-):
+def test_open_auto_attaches_to_stored_gpu_device(shm_name):
+    # open() reconstructs the stream as created: it attaches to the CUDA device
+    # recorded in metadata without the caller having to pass gpu_device.
     writer = pyshmem.create(
         shm_name, shape=(2, 2), dtype=np.float32, gpu_device="cuda:0"
     )
     writer.write(np.ones((2, 2), dtype=np.float32))
-    reader = pyshmem.open(shm_name)
 
-    assert reader.cpu_mirror is False
+    reader = pyshmem.open(shm_name)  # no gpu_device passed
 
-    with pytest.raises(RuntimeError, match="cpu_mirror=True"):
-        reader.read()
+    assert reader.gpu_enabled is True
+    assert reader.gpu_device == "cuda:0"
+    received = reader.read()
+    assert isinstance(received, torch.Tensor)
+    assert received.device.type == "cuda"
+    assert torch.equal(received.cpu(), torch.ones((2, 2)))
 
     reader.close()
     writer.close()
 
 
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
-def test_gpu_stream_with_cpu_mirror_can_be_read_without_gpu_attachment(
-    shm_name,
-):
+def test_open_auto_attaches_gpu_even_with_cpu_mirror(shm_name):
+    # A cpu_mirror stream is still reconstructed with its GPU attachment on a
+    # CUDA host (read returns a CUDA tensor, matching how it was created).
     writer = pyshmem.create(
         shm_name,
         shape=(2, 2),
@@ -142,13 +168,59 @@ def test_gpu_stream_with_cpu_mirror_can_be_read_without_gpu_attachment(
 
     reader = pyshmem.open(shm_name)
 
+    assert reader.gpu_device == "cuda:0"
     assert reader.cpu_mirror is True
     received = reader.read()
+    assert isinstance(received, torch.Tensor)
+    np.testing.assert_array_equal(received.cpu().numpy(), payload)
 
+    reader.close()
+    writer.close()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_open_falls_back_to_cpu_mirror_when_cuda_unavailable(
+    shm_name, monkeypatch
+):
+    # When CUDA cannot be attached but the stream has a CPU mirror, open()
+    # returns a usable CPU handle instead of raising.
+    writer = pyshmem.create(
+        shm_name,
+        shape=(2, 2),
+        dtype=np.float32,
+        gpu_device="cuda:0",
+        cpu_mirror=True,
+    )
+    payload = np.arange(4, dtype=np.float32).reshape(2, 2)
+    writer.write(payload)
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    reader = pyshmem.open(shm_name)
+
+    assert reader.gpu_device is None  # no GPU attachment
+    received = reader.read()
     assert isinstance(received, np.ndarray)
     np.testing.assert_array_equal(received, payload)
 
     reader.close()
+    writer.close()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_open_raises_when_gpu_unavailable_and_no_cpu_mirror(
+    shm_name, monkeypatch
+):
+    # A GPU-only stream cannot be reconstructed without CUDA and has no mirror
+    # to fall back on, so open() raises a clear error.
+    writer = pyshmem.create(
+        shm_name, shape=(2, 2), dtype=np.float32, gpu_device="cuda:0"
+    )
+    writer.write(np.ones((2, 2), dtype=np.float32))
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(RuntimeError, match="CUDA is not available"):
+        pyshmem.open(shm_name)
+
     writer.close()
 
 
@@ -283,6 +355,45 @@ def test_gpu_stream_can_be_opened_in_another_process(shm_name):
     assert message["shape"] == (2, 2)
     assert message["dtype"] == "float32"
     assert message["size"] == payload.nbytes
+    assert message["values"] == payload.tolist()
+
+    writer.close()
+
+
+def _read_gpu_payload_auto(name: str, queue) -> None:
+    # Open WITHOUT gpu_device: it must auto-attach to the stored CUDA device.
+    shm = pyshmem.open(name)
+    payload = shm.read()
+    queue.put(
+        {
+            "device": payload.device.type,
+            "gpu_device": shm.gpu_device,
+            "values": payload.detach().cpu().tolist(),
+        }
+    )
+    shm.close()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_stream_auto_attaches_in_another_process(shm_name):
+    writer = pyshmem.create(
+        shm_name, shape=(2, 2), dtype=np.float32, gpu_device="cuda:0"
+    )
+    payload = np.arange(4, dtype=np.float32).reshape(2, 2)
+    writer.write(payload)
+
+    context = mp.get_context("spawn")
+    queue = context.Queue()
+    process = context.Process(
+        target=_read_gpu_payload_auto, args=(shm_name, queue)
+    )
+    process.start()
+    process.join(timeout=20)
+
+    assert process.exitcode == 0
+    message = queue.get(timeout=5)
+    assert message["device"] == "cuda"
+    assert message["gpu_device"] == "cuda:0"
     assert message["values"] == payload.tolist()
 
     writer.close()
@@ -751,3 +862,136 @@ def test_gpu_stream_context_manager_unlinks_on_exit(shm_name):
 
     with pytest.raises(FileNotFoundError):
         pyshmem.open(shm_name)
+
+
+# ---------------------------------------------------------------------------
+# GPU memory / CUDA IPC cleanup
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_owner_keeps_tensor_on_close_but_drops_on_unlink(shm_name):
+    owner = pyshmem.create(
+        shm_name, shape=(4,), dtype=np.float32, gpu_device="cuda:0"
+    )
+    assert owner._gpu_tensor is not None
+    owner.close()
+    # The owner keeps its tensor after close so the stream stays mappable and
+    # can be reopened in-process.
+    assert owner._gpu_tensor is not None
+    owner.unlink()
+    # Destroying the stream releases the producer's tensor so the GPU
+    # allocation can be reclaimed.
+    assert owner._gpu_tensor is None
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_consumer_releases_tensor_on_close(shm_name):
+    owner = pyshmem.create(
+        shm_name, shape=(4,), dtype=np.float32, gpu_device="cuda:0"
+    )
+    try:
+        consumer = pyshmem.open(shm_name, gpu_device="cuda:0")
+        assert consumer._gpu_tensor is not None
+        consumer.close()
+        # A consumer must drop its mapping on close so torch decrements the
+        # producer's IPC ref counter (otherwise the producer can never reclaim
+        # the GPU allocation).
+        assert consumer._gpu_tensor is None
+    finally:
+        owner.unlink()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_producer_memory_reclaimed_across_attach_release_cycles(shm_name):
+    import gc
+
+    torch.cuda.init()
+    rounds = 12
+    elements = 512 * 512
+    nbytes = elements * 4  # float32
+
+    ctx = mp.get_context("spawn")
+    ready_q, go_q, done_q = ctx.Queue(), ctx.Queue(), ctx.Queue()
+    worker = ctx.Process(
+        target=_attach_release_worker,
+        args=(TEST_SRC_PATH, shm_name, ready_q, go_q, done_q, rounds),
+    )
+    worker.start()
+    try:
+        assert ready_q.get(timeout=60) == "ready"
+
+        gc.collect()
+        torch.cuda.synchronize()
+        torch.cuda.ipc_collect()
+        baseline = torch.cuda.memory_allocated()
+
+        for _ in range(rounds):
+            shm = pyshmem.create(
+                shm_name,
+                shape=(512, 512),
+                dtype=np.float32,
+                gpu_device="cuda:0",
+            )
+            shm.write(torch.ones(512, 512, device="cuda:0"))
+            go_q.put("go")
+            assert done_q.get(timeout=60) == "released"
+            shm.unlink()
+            del shm
+            gc.collect()
+
+        torch.cuda.ipc_collect()
+        torch.cuda.synchronize()
+        leaked = torch.cuda.memory_allocated() - baseline
+        # With correct CUDA IPC bookkeeping the producer reclaims every
+        # allocation after the consumer releases it; allow a small slack for
+        # caching-allocator residue but not 12 leaked tensors.
+        assert leaked <= 3 * nbytes, (
+            f"GPU memory grew by {leaked} bytes over {rounds} "
+            f"attach/release/unlink cycles (~{leaked / nbytes:.1f} leaked "
+            "tensors); CUDA IPC cleanup is broken"
+        )
+    finally:
+        for _ in range(rounds):
+            try:
+                go_q.put("go")
+            except Exception:
+                break
+        worker.join(timeout=10)
+        if worker.is_alive():
+            worker.terminate()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_purge_preserves_cuda_ipc_files_of_live_stream(shm_name):
+    import glob
+
+    owner = pyshmem.create(
+        shm_name, shape=(16,), dtype=np.float32, gpu_device="cuda:0"
+    )
+    try:
+        owner.write(torch.ones(16, device="cuda:0"))
+        # Only inspect IPC files produced by *this* (live) process; earlier
+        # tests' dead subprocesses may have left orphans that the sweep should
+        # (correctly) remove.
+        my_pid = os.getpid()
+        my_files = [
+            path
+            for path in glob.glob("/dev/shm/cuda.shm.*")
+            if pyshmem_shared._cuda_ipc_file_producer_pid(
+                os.path.basename(path)
+            )
+            == my_pid
+        ]
+        assert my_files, "expected a cuda.shm.* file for the live GPU stream"
+
+        removed = pyshmem_shared._remove_orphaned_cuda_ipc_files()
+
+        # The sweep must not touch IPC files backing this live process.
+        for path in my_files:
+            assert os.path.exists(path), f"removed live IPC file {path}"
+            assert os.path.basename(path) not in removed
+        # The tensor is still intact after the sweep.
+        assert torch.allclose(owner.read(), torch.ones(16, device="cuda:0"))
+    finally:
+        owner.unlink()

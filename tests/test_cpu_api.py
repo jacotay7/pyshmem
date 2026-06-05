@@ -539,12 +539,13 @@ def test_list_streams_returns_list():
     sys.platform in ("win32", "darwin"),
     reason="list_streams requires /dev/shm (Linux only)",
 )
-def test_list_streams_includes_data_segment_of_created_stream(shm_name):
-    expected = pyshmem_shared._segment_base_name(shm_name)
-
+def test_list_streams_includes_user_visible_name_of_created_stream(shm_name):
     shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
     try:
-        assert expected in pyshmem.list_streams()
+        streams = pyshmem.list_streams()
+        # list() reports the friendly name, not the hashed segment id.
+        assert shm_name in streams
+        assert pyshmem_shared._segment_base_name(shm_name) not in streams
     finally:
         shm.close()
 
@@ -554,12 +555,14 @@ def test_list_streams_includes_data_segment_of_created_stream(shm_name):
     reason="list_streams is not supported on Windows",
 )
 def test_list_streams_segment_absent_after_unlink(shm_name):
-    expected = pyshmem_shared._segment_base_name(shm_name)
+    expected_base = pyshmem_shared._segment_base_name(shm_name)
 
     shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
     shm.unlink()
 
-    assert expected not in pyshmem.list_streams()
+    streams = pyshmem.list_streams()
+    assert shm_name not in streams
+    assert expected_base not in streams
 
 
 @pytest.mark.skipif(
@@ -587,6 +590,173 @@ def test_list_streams_returns_sorted_results(shm_name):
         assert streams == sorted(streams)
     finally:
         shm.close()
+
+
+# ---------------------------------------------------------------------------
+# user-visible name stored in metadata (list + CLI work off the name)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.cpu
+@pytest.mark.skipif(
+    sys.platform in ("win32", "darwin"),
+    reason="metadata name region requires /dev/shm (Linux only)",
+)
+def test_metadata_round_trips_user_visible_name(shm_name):
+    shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    try:
+        base = pyshmem_shared._segment_base_name(shm_name)
+        assert pyshmem_shared._stream_name_for_base(base) == shm_name
+    finally:
+        shm.close()
+
+
+@pytest.mark.cpu
+@pytest.mark.skipif(
+    sys.platform in ("win32", "darwin"),
+    reason="metadata name region requires /dev/shm (Linux only)",
+)
+def test_metadata_round_trips_unicode_name():
+    name = "strëam-π-名前"
+    shm = pyshmem.create(name, shape=(2,), dtype=np.float32)
+    try:
+        assert name in pyshmem.list_streams()
+    finally:
+        shm.unlink()
+
+
+@pytest.mark.cpu
+def test_create_rejects_name_too_long_for_metadata():
+    too_long = "x" * (pyshmem_shared.METADATA_NAME_MAX + 1)
+    with pytest.raises(ValueError, match="too long"):
+        pyshmem.create(too_long, shape=(2,), dtype=np.float32)
+    # No segments should have leaked from the rejected create.
+    base = pyshmem_shared._segment_base_name(too_long)
+    assert base not in pyshmem.list_streams()
+
+
+@pytest.mark.cpu
+@pytest.mark.skipif(
+    sys.platform in ("win32", "darwin"),
+    reason="metadata name region requires /dev/shm (Linux only)",
+)
+def test_read_stream_name_returns_none_for_legacy_short_segment(shm_name):
+    # Segments written by older pyshmem reserved no name region; emulate one
+    # by creating a metadata-sized segment without the name bytes.
+    from multiprocessing import shared_memory
+
+    meta = shared_memory.SharedMemory(
+        name=pyshmem_shared._metadata_name(shm_name),
+        create=True,
+        size=pyshmem_shared.METADATA_BYTES,
+    )
+    pyshmem_shared._unregister(meta)
+    try:
+        assert pyshmem_shared._read_stream_name(meta) is None
+    finally:
+        meta.close()
+        meta.unlink()
+
+
+# ---------------------------------------------------------------------------
+# purge: stream segments + orphaned CUDA IPC files
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.cpu
+@pytest.mark.skipif(
+    sys.platform in ("win32", "darwin"),
+    reason="purge sweeps /dev/shm (Linux only)",
+)
+def test_purge_removes_stream_segments_and_reports_name(shm_name):
+    pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    base = pyshmem_shared._segment_base_name(shm_name)
+
+    removed = pyshmem.purge()
+
+    # purge reports the user-visible name, not the hashed segment id.
+    assert shm_name in removed
+    assert base not in removed
+    assert pyshmem.list_streams() == []
+    for suffix in ("", "_meta", "_gpu"):
+        assert not os.path.exists(f"/dev/shm/{base}{suffix}")
+
+
+def _dead_pid():
+    """Return a PID that is guaranteed not to be alive."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+@pytest.mark.cpu
+@pytest.mark.skipif(
+    sys.platform in ("win32", "darwin"),
+    reason="purge sweeps /dev/shm (Linux only)",
+)
+def test_purge_removes_orphaned_cuda_ipc_files():
+    # A torch CUDA IPC ref-count file left behind by a dead producer.  The
+    # filename encodes the producer PID in hex: cuda.shm.<id>.<pid>.<seq>.
+    # Use a distinctive <id> so we never clobber a real torch ref-count file.
+    fake = f"/dev/shm/cuda.shm.pyshmemtest.{_dead_pid():x}.1"
+    with open(fake, "wb") as handle:
+        handle.write(b"\x00")
+    assert os.path.exists(fake)
+
+    pyshmem.purge()
+
+    assert not os.path.exists(fake)
+
+
+@pytest.mark.cpu
+@pytest.mark.skipif(
+    sys.platform in ("win32", "darwin"),
+    reason="cuda ipc sweep requires /dev/shm (Linux only)",
+)
+def test_remove_orphaned_cuda_ipc_files_returns_removed_basenames():
+    fake = f"/dev/shm/cuda.shm.pyshmemtest.{_dead_pid():x}.2"
+    with open(fake, "wb") as handle:
+        handle.write(b"\x00")
+    try:
+        removed = pyshmem_shared._remove_orphaned_cuda_ipc_files()
+        assert os.path.basename(fake) in removed
+        assert not os.path.exists(fake)
+    finally:
+        if os.path.exists(fake):
+            os.remove(fake)
+
+
+@pytest.mark.cpu
+@pytest.mark.skipif(
+    sys.platform in ("win32", "darwin"),
+    reason="cuda ipc sweep requires /dev/shm (Linux only)",
+)
+def test_remove_orphaned_cuda_ipc_files_skips_live_producer_files():
+    # A cuda.shm.* file whose producer PID is still alive must NOT be removed:
+    # yanking a live CUDA IPC ref-count file corrupts the owning process's
+    # tensors.  Our own PID is, by definition, alive.  Use a distinctive <id>
+    # so we never collide with a real torch ref-count file for this process.
+    fake = f"/dev/shm/cuda.shm.pyshmemtest.{os.getpid():x}.3"
+    with open(fake, "wb") as handle:
+        handle.write(b"\x00")
+    try:
+        removed = pyshmem_shared._remove_orphaned_cuda_ipc_files()
+        assert os.path.basename(fake) not in removed
+        assert os.path.exists(fake)
+    finally:
+        if os.path.exists(fake):
+            os.remove(fake)
+
+
+@pytest.mark.cpu
+def test_cuda_ipc_file_producer_pid_parsing():
+    parse = pyshmem_shared._cuda_ipc_file_producer_pid
+    assert parse("cuda.shm.3e9.52f2.1") == 0x52F2
+    assert parse("cuda.shm.abc.deadbeef.7") == 0xDEADBEEF
+    # Unparseable names yield None (and are therefore never swept).
+    assert parse("cuda.shm.nothex") is None
+    assert parse("ps_abcdef123456") is None
+    assert parse("cuda.shm.3e9.nothex.1") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1006,16 +1176,17 @@ def test_create_from_config_write_read_round_trip(shm_name):
     sys.platform != "linux",
     reason="CLI list requires /dev/shm (Linux only)",
 )
-def test_cli_list_shows_created_stream_segment(shm_name, capsys):
+def test_cli_list_shows_created_stream_name(shm_name, capsys):
     import pyshmem._cli as cli
 
-    expected = pyshmem_shared._segment_base_name(shm_name)
     shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
     try:
         exit_code = cli.main(["list"])
         assert exit_code == 0
         captured = capsys.readouterr()
-        assert expected in captured.out
+        # CLI list reports the user-visible name, not the hashed segment id.
+        assert shm_name in captured.out
+        assert pyshmem_shared._segment_base_name(shm_name) not in captured.out
     finally:
         shm.close()
 

@@ -23,13 +23,13 @@ def main(argv=None) -> int:
         metavar="NAME",
         help=(
             "User-visible stream names to unlink (the name passed to "
-            "pyshmem.create, NOT the hashed ps_* identifier shown by 'list')."
+            "pyshmem.create, as shown by 'list')."
         ),
     )
 
     sub.add_parser(
         "list",
-        help="List segment identifiers for all existing pyshmem streams.",
+        help="List the user-visible names of all existing pyshmem streams.",
     )
 
     sub.add_parser(

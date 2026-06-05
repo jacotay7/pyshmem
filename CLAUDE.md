@@ -12,13 +12,13 @@ A **stream** is a named slot in shared memory with a fixed shape, dtype, and sto
 ### Internal segments
 Each logical stream `name` maps to up to three POSIX shared-memory segments:
 - **data segment** — the array payload (`ps_<sha1hash>`)
-- **metadata segment** — a `float64[32]` array with shape, dtype, counts, lock state, etc. (`ps_<sha1hash>_meta`)
-- **GPU handle segment** — serialized `_share_cuda_()` handle for cross-process GPU tensor reconstruction (`ps_<sha1hash>_gpu`)
+- **metadata segment** — a `float64[32]` array followed by a 256-byte name region (`ps_<sha1hash>_meta`)
+- **GPU handle segment** — torch `reduce_tensor()` payload (`(rebuild_fn, args)`, pickled) for cross-process GPU tensor reconstruction (`ps_<sha1hash>_gpu`)
 
-Names are hashed (SHA-1, first 14 chars) to stay under the POSIX segment name limit while remaining collision-resistant.
+Names are hashed (SHA-1, first 14 chars) to stay under the POSIX segment name limit while remaining collision-resistant. Because the hash is one-way, the original user-visible name is stored verbatim in the metadata segment's name region (UTF-8, null-padded, after the float64 block) so `list_streams()`/the CLI can report the friendly name. `METADATA_TOTAL_BYTES = METADATA_BYTES (256) + METADATA_NAME_MAX (256)`; readers tolerate legacy 256-byte segments by falling back to the hashed id.
 
 ### Metadata layout (METADATA_INDEX_* constants)
-The metadata array stores (in order): version, write count, dtype code, ndim, size, gpu_enabled flag, device index, creator PID, write timestamp, write sequence number, lock owner PID, lock depth, cpu_mirror flag, then shape dimensions starting at index 13. `METADATA_SIZE = 32` (total slots).
+The metadata array stores (in order): version, write count, dtype code, ndim, size, gpu_enabled flag, device index, creator PID, write timestamp, write sequence number, lock owner PID, lock depth, cpu_mirror flag, then shape dimensions starting at index 13. `METADATA_SIZE = 32` (float64 slots); the user-visible name lives in the byte region at offset `METADATA_BYTES` (=256).
 
 ### Locking model
 - Cross-process: `portalocker` file locks in `/tmp/pyshmem-locks-<uid>/` (or `$PYSHMEM_LOCK_DIR`)
@@ -35,7 +35,14 @@ Writers bracket payloads with odd/even sequence numbers:
 Readers poll until `WRITE_SEQUENCE` is even (stable), snapshot the data, then verify the sequence didn't change. This lock-free consistency mechanism is in `_read_consistent_cpu()` and `_read_consistent_gpu()`.
 
 ### GPU IPC
-GPU streams use `torch.UntypedStorage._share_cuda_()` / `_new_shared_cuda()` for cross-process tensor sharing. The serialized CUDA IPC handle is stored in the GPU handle segment. A per-process weakref cache (`_LOCAL_GPU_TENSORS`) avoids re-importing handles within the creator process.
+GPU streams share tensors cross-process via torch's **official** reduction: the producer exports with `torch.multiprocessing.reductions.reduce_tensor()` (storing the pickled `(rebuild_fn, args)` in the GPU handle segment) and the consumer reconstructs with `rebuild_fn(*args)`. This is deliberate — calling `storage._share_cuda_()` / `_new_shared_cuda()` directly (the old approach) bypasses torch's `shared_cache` + IPC ref-counter bookkeeping, which **leaks the producer's GPU allocation for the process lifetime** because the counter never reaches zero. With `reduce_tensor`, the producer can reclaim memory via `torch.cuda.ipc_collect()` once consumers release.
+
+GPU-memory lifecycle rules (see `SharedMemory.close`/`unlink`):
+- **Consumer** handles drop their CUDA tensor on `close()` — this decrements the producer's IPC ref counter (required for the producer to ever reclaim).
+- The **owner** keeps its tensor on `close()` (so the stream stays mappable/reopenable in-process) and only releases it on `unlink()`, which also calls `torch.cuda.ipc_collect()`.
+- A per-process weakref cache (`_LOCAL_GPU_TENSORS`) avoids re-importing handles within the creator process.
+
+`purge()` additionally sweeps orphaned `cuda.shm.*` ref-count files left by **dead** producers — it parses the producer PID from the filename (`cuda.shm.<id>.<pid_hex>.<seq>`) and only removes files whose PID is no longer alive, so it never corrupts a live process's CUDA tensors.
 
 ## Public API
 
@@ -51,12 +58,15 @@ shm = pyshmem.create("tmp", shape=(10,), auto_unlink=True)
 with pyshmem.stream("tmp2", shape=(10,)) as shm:   # always auto-unlinks
     ...
 
-# Attach
+# Attach — open() reconstructs the stream as created.  For a GPU stream it
+# auto-attaches to the CUDA device recorded in metadata; no need to pass
+# gpu_device. Passing gpu_device explicitly still works (and must match).
 shm = pyshmem.open("my_stream")
-shm = pyshmem.open("my_gpu_stream", gpu_device="cuda:0")
+shm = pyshmem.open("my_gpu_stream")                 # auto-attaches to its cuda:N
+shm = pyshmem.open("my_gpu_stream", gpu_device="cuda:0")  # explicit (must match)
 
 # Discover
-pyshmem.list_streams()    # returns sorted list of ps_* segment base names
+pyshmem.list_streams()    # returns sorted list of user-visible stream names
 
 # Use
 shm.write(array)          # CPU: numpy array; GPU: numpy or CUDA tensor
@@ -96,16 +106,17 @@ pyshmem.unlink("my_stream")
 ## CLI
 
 ```bash
-pyshmem list                     # list all existing pyshmem stream segments
+pyshmem list                     # list user-visible names of all streams
 pyshmem unlink my_stream         # destroy a stream by user-visible name
 pyshmem unlink stream_a stream_b # destroy multiple streams
+pyshmem purge                    # remove ALL pyshmem segments + orphaned cuda.shm.* files
 ```
 
 ## Key Implementation Details
 
 - **`create()`** calls `SharedMemory._create()` which creates segments atomically (with cleanup on failure).
 - **`open()`** calls `SharedMemory._open()` which reads metadata to reconstruct shape/dtype without needing the caller to know them.
-- **GPU streams without `cpu_mirror`**: only processes that open with `gpu_device=` can `read()` or `write()` to the tensor. Metadata and locking still work without a GPU attachment.
+- **`open()` reconstructs the stream as created** (`_resolve_open_target_device`): for a GPU stream it auto-attaches to the stored device (`METADATA_INDEX_DEVICE_INDEX`) even when the caller omits `gpu_device`. If the device can't be attached, it falls back to the CPU mirror when one exists (e.g. the producer exited but `cpu_mirror=True`), and otherwise raises a clear error. An explicit `gpu_device=` is validated against the stored device and, if it can't attach, raises rather than falling back.
 - **Resource tracker suppression**: `_unregister()` removes segments from Python's `resource_tracker` so child process exits don't spuriously warn about leaked shared memory.
 - **Platform**: Full Linux support. macOS: GPU IPC is not tested. Windows: uses named shared memory (no POSIX shm_unlink).
 

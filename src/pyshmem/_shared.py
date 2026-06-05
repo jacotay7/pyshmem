@@ -94,6 +94,13 @@ METADATA_INDEX_LOCK_DEPTH = 11
 METADATA_INDEX_CPU_MIRROR_ENABLED = 12
 METADATA_INDEX_SHAPE_START = 13
 METADATA_SIZE = 32
+METADATA_BYTES = METADATA_SIZE * np.dtype(np.float64).itemsize
+# A fixed byte region appended after the float64 metadata block stores the
+# original, user-visible stream name (UTF-8, null-padded).  Segment ids are a
+# one-way SHA-1 hash of the name, so this is the only way list() and the CLI
+# can report the friendly name instead of the hashed ``ps_*`` id.
+METADATA_NAME_MAX = 256
+METADATA_TOTAL_BYTES = METADATA_BYTES + METADATA_NAME_MAX
 
 _THREAD_LOCK_GUARD = threading.Lock()
 _THREAD_LOCKS: dict[str, "_SharedLockState"] = {}
@@ -135,6 +142,46 @@ def _metadata_name(name: str) -> str:
 
 def _gpu_handle_name(name: str) -> str:
     return f"{_segment_base_name(name)}_gpu"
+
+
+def _encode_stream_name(name: str) -> bytes:
+    encoded = name.encode("utf-8")
+    if len(encoded) > METADATA_NAME_MAX:
+        raise ValueError(
+            "stream name is too long to store in metadata "
+            f"(max {METADATA_NAME_MAX} UTF-8 bytes, got {len(encoded)})"
+        )
+    return encoded
+
+
+def _write_stream_name(metadata_shm: shared_memory.SharedMemory, name: str):
+    """Store the user-visible name in the name region of a metadata segment."""
+    buf = metadata_shm.buf
+    if len(buf) < METADATA_TOTAL_BYTES:
+        return
+    encoded = _encode_stream_name(name)
+    buf[METADATA_BYTES:METADATA_TOTAL_BYTES] = b"\x00" * METADATA_NAME_MAX
+    buf[METADATA_BYTES : METADATA_BYTES + len(encoded)] = encoded
+
+
+def _read_stream_name(
+    metadata_shm: shared_memory.SharedMemory,
+) -> str | None:
+    """Recover the user-visible name from a metadata segment, if present.
+
+    Returns ``None`` for segments written by older pyshmem versions (which did
+    not reserve the name region) or for any unreadable bytes.
+    """
+    buf = metadata_shm.buf
+    if len(buf) < METADATA_TOTAL_BYTES:
+        return None
+    raw = bytes(buf[METADATA_BYTES:METADATA_TOTAL_BYTES]).split(b"\x00", 1)[0]
+    if not raw:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def _lock_path(name: str) -> str:
@@ -236,6 +283,81 @@ def _safe_remove(path: str) -> None:
         pass
 
 
+def _collect_cuda_ipc() -> None:
+    """Force torch to release this process's freed CUDA IPC ref-count files.
+
+    Torch shares GPU tensors across processes by ref-counting them through
+    ``cuda.shm.*`` segments in ``/dev/shm``.  Calling ``ipc_collect`` lets
+    torch reclaim the ones whose tensors have been dropped.  No-op sans CUDA.
+    """
+    if torch is None:
+        return
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.path.isdir(f"/proc/{pid}"):
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but owned by another user
+    except OSError:
+        return True  # be conservative: assume alive
+    return True
+
+
+def _cuda_ipc_file_producer_pid(base: str) -> int | None:
+    """Parse the producer PID from a torch CUDA IPC filename.
+
+    Torch names its ref-count segments ``cuda.shm.<id>.<pid_hex>.<seq>`` where
+    ``<pid_hex>`` is the hex PID of the producer process.  Returns the PID, or
+    ``None`` if the name does not match that layout.
+    """
+    parts = base.split(".")
+    if len(parts) < 4 or parts[0] != "cuda" or parts[1] != "shm":
+        return None
+    try:
+        return int(parts[-2], 16)
+    except ValueError:
+        return None
+
+
+def _remove_orphaned_cuda_ipc_files() -> list[str]:
+    """Unlink *orphaned* torch CUDA IPC ref-count files from ``/dev/shm``.
+
+    When a producer process exits before releasing its shared CUDA tensors
+    the ``cuda.shm.*`` ref-count segments it created are orphaned.  ``purge``
+    sweeps these as part of clearing all pyshmem state.  A file is removed only
+    when its producer PID (encoded in the filename) belongs to a process that
+    is no longer alive — removing a *live* producer's ref-count file would
+    corrupt that process's CUDA tensors.  Files whose name we cannot parse are
+    left alone.  Returns the basenames removed.
+    """
+    if os.name == "nt":
+        return []
+    shm_dir = "/dev/shm"
+    if not os.path.isdir(shm_dir):
+        return []
+    removed = []
+    for path in glob.glob(os.path.join(shm_dir, "cuda.shm.*")):
+        base = os.path.basename(path)
+        producer_pid = _cuda_ipc_file_producer_pid(base)
+        if producer_pid is None or _pid_is_alive(producer_pid):
+            continue
+        _safe_remove(path)
+        removed.append(base)
+    return sorted(removed)
+
+
 def _normalize_shape(shape: Sequence[int]) -> tuple[int, ...]:
     if not shape:
         raise ValueError("shape must contain at least one dimension")
@@ -262,15 +384,6 @@ def _normalize_cpu_mirror(
     if cpu_mirror is None:
         return False
     return bool(cpu_mirror)
-
-
-def _contiguous_stride(shape: tuple[int, ...]) -> tuple[int, ...]:
-    stride = [1] * len(shape)
-    running = 1
-    for index in range(len(shape) - 1, -1, -1):
-        stride[index] = running
-        running *= shape[index]
-    return tuple(stride)
 
 
 def _normalize_size(
@@ -326,6 +439,59 @@ def _torch_dtype_for(dtype: np.dtype):
     return torch_dtype
 
 
+def _resolve_open_target_device(
+    name: str,
+    device_index: int,
+    gpu_device: str | int | None,
+    cpu_mirror: bool,
+):
+    """Decide which CUDA device ``open()`` should attach a GPU stream to.
+
+    ``open()`` reconstructs the stream as it was created, so by default
+    (``gpu_device is None``) it attaches to the device recorded in metadata.
+
+    Returns ``(device, strict)`` where ``device`` is a ``torch.device`` to
+    attach to, or ``None`` to open without a GPU attachment — only viable when
+    the stream carries a CPU mirror.  ``strict`` is ``True`` when the caller
+    named a device explicitly, in which case a failed attach must propagate
+    rather than fall back to the mirror.  Raises when the stream needs a GPU
+    that this host cannot provide and there is no CPU mirror to fall back on.
+    """
+    if gpu_device is not None:
+        resolved = _normalize_gpu_device(gpu_device)
+        if device_index < 0:
+            raise ValueError(
+                f"{name!r} does not advertise a valid CUDA device"
+            )
+        if resolved.index != device_index:
+            raise ValueError(
+                f"requested GPU device {resolved} does not match stored "
+                f"device cuda:{device_index}"
+            )
+        return resolved, True
+
+    if device_index < 0:
+        raise ValueError(
+            f"{name!r} is GPU-backed but advertises no CUDA device"
+        )
+    if torch is None or not torch.cuda.is_available():
+        if cpu_mirror:
+            return None, False
+        raise RuntimeError(
+            f"{name!r} is a GPU stream on cuda:{device_index} but CUDA is not "
+            "available in this process; install a CUDA-enabled torch, or "
+            "recreate the stream with cpu_mirror=True for CPU access"
+        )
+    if device_index >= torch.cuda.device_count():
+        if cpu_mirror:
+            return None, False
+        raise RuntimeError(
+            f"{name!r} is on cuda:{device_index} but this host only has "
+            f"{torch.cuda.device_count()} CUDA device(s)"
+        )
+    return torch.device(f"cuda:{device_index}"), False
+
+
 def _open_existing_segment(name: str) -> shared_memory.SharedMemory | None:
     try:
         shm = shared_memory.SharedMemory(name=name)
@@ -353,15 +519,18 @@ def purge() -> list[str]:
     """Remove all pyshmem segments from shared memory.
 
     Scans ``/dev/shm`` for all ``ps_*`` files (data, ``_meta``, and ``_gpu``
-    variants) and unlinks them, then removes any matching lock files.  Returns
-    the list of *base* segment names (no suffix) that were removed.
+    variants) and unlinks them, then removes any matching lock files.  It also
+    sweeps leftover torch CUDA IPC ref-count files (``cuda.shm.*``) created by
+    GPU streams whose producer process exited without releasing its tensors.
+    Returns the user-visible names of the streams removed (falling back to the
+    hashed ``ps_*`` segment id for streams created by older pyshmem versions
+    that did not record the name).
 
     This is the correct tool for cleaning up after a test run or clearing a
     machine that has accumulated stale streams.  It is *not* reversible.
 
-    Note: :func:`pyshmem list` shows hashed segment names; :func:`pyshmem
-    unlink` expects the original *user-visible* name.  Use ``purge`` when you
-    want to remove everything without knowing the original names.
+    Use ``purge`` when you want to remove everything (including orphaned GPU
+    IPC files) without enumerating individual stream names.
     """
     if os.name == "nt":
         return []
@@ -371,6 +540,13 @@ def purge() -> list[str]:
     all_segment_files = set()
     for path in glob.glob(os.path.join(shm_dir, "ps_*")):
         all_segment_files.add(os.path.basename(path))
+    # Recover user-visible names from metadata segments *before* unlinking.
+    base_names = sorted(
+        s
+        for s in all_segment_files
+        if not s.endswith("_meta") and not s.endswith("_gpu")
+    )
+    purged_names = [_stream_name_for_base(base) or base for base in base_names]
     if _can_directly_unlink_posix_segments():
         for segment_name in sorted(all_segment_files):
             _safe_posix_shm_unlink(segment_name)
@@ -394,11 +570,11 @@ def purge() -> list[str]:
     for lock_path in glob.glob(os.path.join(lock_dir, "ps_*.lock")):
         _safe_remove(lock_path)
     _LOCAL_GPU_TENSORS.clear()
-    return sorted(
-        s
-        for s in all_segment_files
-        if not s.endswith("_meta") and not s.endswith("_gpu")
-    )
+    # Release this process's own freed CUDA IPC files, then sweep any orphans
+    # left behind by producers that exited without releasing their tensors.
+    _collect_cuda_ipc()
+    _remove_orphaned_cuda_ipc_files()
+    return sorted(purged_names)
 
 
 def unlink_quiet(name: str) -> None:
@@ -443,13 +619,30 @@ def unlink(name: str) -> None:
     _safe_remove(_lock_path(name))
 
 
-def list_streams() -> list[str]:
-    """Return the segment base names of all existing pyshmem streams.
+def _stream_name_for_base(base: str) -> str | None:
+    """Recover the user-visible name stored in a stream's metadata segment."""
+    try:
+        meta_shm = shared_memory.SharedMemory(name=f"{base}_meta")
+    except FileNotFoundError:
+        return None
+    _unregister(meta_shm)
+    try:
+        return _read_stream_name(meta_shm)
+    finally:
+        try:
+            meta_shm.close()
+        except Exception:
+            pass
 
-    On Linux, scans ``/dev/shm/`` for ``ps_*`` data-segment files.  Returns
-    segment identifiers such as ``"ps_abcdef1234567"``; these are the hashed
-    names, not the user-visible names passed to :func:`create`.  Returns an
-    empty list on platforms where the scan is not supported.
+
+def list_streams() -> list[str]:
+    """Return the user-visible names of all existing pyshmem streams.
+
+    On Linux, scans ``/dev/shm/`` for ``ps_*`` data-segment files and recovers
+    the original name passed to :func:`create` from each stream's metadata.
+    Streams created by older pyshmem versions (which did not record the name)
+    fall back to their hashed ``ps_*`` segment id.  Returns an empty list on
+    platforms where the scan is not supported.
     """
     if os.name == "nt":
         return []
@@ -461,7 +654,7 @@ def list_streams() -> list[str]:
         base = os.path.basename(path)
         if base.endswith("_meta") or base.endswith("_gpu"):
             continue
-        result.append(base)
+        result.append(_stream_name_for_base(base) or base)
     return sorted(result)
 
 
@@ -692,6 +885,7 @@ class SharedMemory:
         gpu_device: str | int | None = None,
         cpu_mirror: bool | None = None,
     ) -> "SharedMemory":
+        _encode_stream_name(name)  # validate length before allocating segments
         normalized_shape = _normalize_shape(shape)
         normalized_dtype = _normalize_dtype(dtype)
         normalized_size = _normalize_size(
@@ -716,7 +910,7 @@ class SharedMemory:
             metadata_shm = shared_memory.SharedMemory(
                 name=_metadata_name(name),
                 create=True,
-                size=METADATA_SIZE * np.dtype(np.float64).itemsize,
+                size=METADATA_TOTAL_BYTES,
             )
         except FileExistsError as exc:
             try:
@@ -769,6 +963,7 @@ class SharedMemory:
             )
             for index, axis in enumerate(normalized_shape):
                 metadata[METADATA_INDEX_SHAPE_START + index] = axis
+            _write_stream_name(metadata_shm, name)
         except Exception:
             try:
                 data_shm.close()
@@ -855,30 +1050,38 @@ class SharedMemory:
         gpu_tensor = None
         gpu_handle_shm = None
         torch_dtype = None
-        if gpu_enabled and gpu_device is not None:
-            resolved_gpu = _normalize_gpu_device(gpu_device)
-            if device_index < 0:
+        if gpu_enabled:
+            try:
+                target_device, strict = _resolve_open_target_device(
+                    name, device_index, gpu_device, cpu_mirror_enabled
+                )
+                if target_device is not None:
+                    torch_dtype = _torch_dtype_for(dtype)
+                    try:
+                        gpu_tensor, gpu_handle_shm = (
+                            _open_gpu_tensor_from_handle(
+                                name=name,
+                                shape=shape,
+                                torch_dtype=torch_dtype,
+                                creator_pid=creator_pid,
+                            )
+                        )
+                        resolved_gpu = target_device
+                    except Exception:
+                        # The IPC handle could not be mapped (e.g. the producer
+                        # process exited).  Fall back to the CPU mirror when
+                        # the stream has one and the device was not requested
+                        # explicitly; otherwise the failure is fatal.
+                        if strict or not cpu_mirror_enabled:
+                            raise
+                        resolved_gpu = None
+                        gpu_tensor = None
+                        gpu_handle_shm = None
+                        torch_dtype = None
+            except Exception:
                 metadata_shm.close()
                 data_shm.close()
-                raise ValueError(
-                    f"{name!r} does not advertise a valid CUDA device"
-                )
-            if resolved_gpu.index != device_index:
-                metadata_shm.close()
-                data_shm.close()
-                message = (
-                    f"requested GPU device {resolved_gpu} "
-                    "does not match stored device "
-                    f"cuda:{device_index}"
-                )
-                raise ValueError(message)
-            torch_dtype = _torch_dtype_for(dtype)
-            gpu_tensor, gpu_handle_shm = _open_gpu_tensor_from_handle(
-                name=name,
-                shape=shape,
-                torch_dtype=torch_dtype,
-                creator_pid=creator_pid,
-            )
+                raise
 
         return cls(
             name=name,
@@ -922,12 +1125,29 @@ class SharedMemory:
         self._gpu_handle_shm = None
         self._metadata_shm = None
         self._data_shm = None
+        # Release a *consumer's* mapped CUDA tensor here so torch decrements
+        # the producer's cross-process IPC ref counter; without this the
+        # producer can never reclaim the GPU allocation (the counter stays
+        # non-zero) and GPU memory grows with every attach.  The owner keeps
+        # its reference on close so the stream remains mappable and reopenable
+        # in-process; the owner only releases it in :meth:`unlink`, when the
+        # stream is destroyed.
+        if self._gpu_tensor is not None and not self.owner:
+            self._gpu_tensor = None
         self._closed = True
 
     def unlink(self) -> None:
         """Destroy the underlying named shared-memory stream."""
+        had_gpu_tensor = self._gpu_tensor is not None
         self.close()
+        # The stream is being destroyed: drop the owner's CUDA tensor too
+        # (close keeps it for the owner) so the producer memory can be freed,
+        # then prompt torch to reclaim any IPC blocks whose consumers have
+        # released them.
+        self._gpu_tensor = None
         unlink(self.name)
+        if had_gpu_tensor:
+            _collect_cuda_ipc()
 
     def delete(self) -> None:
         """Alias for :meth:`unlink`."""
@@ -1029,9 +1249,9 @@ class SharedMemory:
                 return self._gpu_tensor
             if self.gpu_enabled and not self.cpu_mirror:
                 raise RuntimeError(
-                    "GPU shared memory was created without cpu_mirror=True; "
-                    "reopen it with "
-                    f"pyshmem.open({self.name!r}, gpu_device='cuda:N')"
+                    f"GPU stream {self.name!r} is not attached on this handle "
+                    "and has no CPU mirror; open it from a process with "
+                    "access to its CUDA device"
                 )
             return self._array
 
@@ -1207,9 +1427,19 @@ class SharedMemory:
 def _create_gpu_tensor_and_handle(
     *, name: str, shape: tuple[int, ...], torch_dtype, gpu_device: Any
 ):
+    from torch.multiprocessing.reductions import reduce_tensor
+
     gpu_tensor = torch.empty(shape, dtype=torch_dtype, device=gpu_device)
-    storage = gpu_tensor._typed_storage()
-    handle_payload = pickle.dumps(storage._share_cuda_(), protocol=4)
+    # Export the CUDA IPC handle through torch's official tensor reduction
+    # rather than calling ``storage._share_cuda_()`` directly.  reduce_tensor
+    # registers the storage in torch's ``shared_cache`` and wires up the
+    # cross-process ref counter, which is what lets the producer's GPU memory
+    # actually be reclaimed by ``torch.cuda.ipc_collect()`` once consumers
+    # release the tensor and the stream is unlinked.  The direct
+    # ``_share_cuda_()`` path bypasses that bookkeeping and leaks the
+    # allocation for the lifetime of the producer process.
+    rebuild_fn, rebuild_args = reduce_tensor(gpu_tensor)
+    handle_payload = pickle.dumps((rebuild_fn, rebuild_args), protocol=4)
     handle_shm = shared_memory.SharedMemory(
         name=_gpu_handle_name(name), create=True, size=len(handle_payload)
     )
@@ -1251,39 +1481,21 @@ def _open_gpu_tensor_from_handle(
 
         handle_shm = shared_memory.SharedMemory(name=_gpu_handle_name(name))
         _unregister(handle_shm)
-        (
-            device_index,
-            handle_bytes,
-            storage_size_bytes,
-            storage_offset_bytes,
-            ref_counter_handle,
-            ref_counter_offset,
-            event_handle,
-            event_sync_required,
-        ) = pickle.loads(bytes(handle_shm.buf))
+        rebuild_fn, rebuild_args = pickle.loads(bytes(handle_shm.buf))
 
         torch.cuda._lazy_init()
-        storage = torch.UntypedStorage._new_shared_cuda(
-            device_index,
-            handle_bytes,
-            storage_size_bytes,
-            storage_offset_bytes,
-            ref_counter_handle,
-            ref_counter_offset,
-            event_handle,
-            event_sync_required,
-        )
-        typed_storage = torch.storage.TypedStorage(
-            wrap_storage=storage,
-            dtype=torch_dtype,
-            _internal=True,
-        )
-        tensor = torch._utils._rebuild_tensor(
-            typed_storage,
-            0,
-            shape,
-            _contiguous_stride(shape),
-        )
+        # ``rebuild_fn`` is torch's ``rebuild_cuda_tensor``; it maps the IPC
+        # handle and installs the consumer-side ref-counted storage whose
+        # finalizer decrements the producer's counter on release.  That
+        # decrement is what eventually lets the producer reclaim the memory.
+        tensor = rebuild_fn(*rebuild_args)
+        if tuple(tensor.shape) != tuple(shape) or tensor.dtype != torch_dtype:
+            raise ValueError(
+                f"reconstructed GPU tensor for {name!r} does not match the "
+                f"stream geometry (expected shape {tuple(shape)} dtype "
+                f"{torch_dtype}, got shape {tuple(tensor.shape)} dtype "
+                f"{tensor.dtype})"
+            )
         _cache_gpu_tensor(name, tensor)
         return tensor, handle_shm
 
