@@ -47,11 +47,18 @@ The public package surface is intentionally small:
 - :func:`pyshmem.create` — create a new named stream
 - :func:`pyshmem.open` — attach to an existing stream
 - :func:`pyshmem.unlink` — destroy a stream by name
+- :func:`pyshmem.unlink_quiet` — destroy a stream, ignoring "does not exist"
+- :func:`pyshmem.purge` — remove *all* pyshmem segments (and orphaned GPU IPC
+  files) from the machine
 - :func:`pyshmem.stream` — context manager that creates and auto-unlinks
-- :func:`pyshmem.list_streams` — list all existing stream identifiers (Linux)
+- :func:`pyshmem.list_streams` — list the user-visible names of existing
+  streams (Linux)
 - :func:`pyshmem.gpu_available` — check whether CUDA streams are usable
 - :data:`pyshmem.GPU_SUPPORTED_DTYPES` — dtypes accepted for GPU streams
 - :class:`pyshmem.SharedMemory` — the stream handle object
 
+The same lifecycle operations are available from the command line — see
+:doc:`cli`.
+
 See :doc:`api` for the full reference.  The best path for new users is to read
-:doc:`installation` and then :doc:`usage`.
+:doc:`quickstart`, then :doc:`installation` and :doc:`usage`.

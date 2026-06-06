@@ -9,7 +9,7 @@ segments.  A segment survives the creator process exiting as long as at least
 one other process still has it open (or until :func:`pyshmem.unlink` is called
 by any process).
 
-GPU IPC via ``torch.UntypedStorage._share_cuda_()`` is supported on Linux.
+GPU IPC (via torch's ``reduce_tensor`` reduction) is supported on Linux.
 
 macOS
 -----

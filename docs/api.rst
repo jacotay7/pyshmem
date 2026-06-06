@@ -12,6 +12,10 @@ Top-level functions and constants
 
 .. autofunction:: pyshmem.unlink
 
+.. autofunction:: pyshmem.unlink_quiet
+
+.. autofunction:: pyshmem.purge
+
 .. autofunction:: pyshmem.stream
 
 .. autofunction:: pyshmem.list_streams

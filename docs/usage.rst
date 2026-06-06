@@ -76,16 +76,37 @@ the name.
    print(reader.shape)   # (480, 640)
    print(reader.dtype)   # float32
 
-For GPU-backed streams, pass ``gpu_device`` to obtain a CUDA tensor view:
+For GPU-backed streams, :func:`~pyshmem.open` reconstructs the stream exactly
+as it was created.  By default it **auto-attaches to the CUDA device recorded
+in the stream's metadata** — you do not need to pass ``gpu_device``:
+
+.. code-block:: python
+
+   reader = pyshmem.open("my_gpu_stream")          # attaches to its cuda:N
+   tensor = reader.read()                          # torch.Tensor on that device
+
+You may still name the device explicitly; it is validated against the stored
+device and must match:
 
 .. code-block:: python
 
    reader = pyshmem.open("my_gpu_stream", gpu_device="cuda:0")
 
-Omitting ``gpu_device`` for a GPU stream gives a CPU-only handle: metadata and
-locking still work, but :meth:`~pyshmem.SharedMemory.read` and
-:meth:`~pyshmem.SharedMemory.write` raise a :class:`RuntimeError` unless the
-stream was created with ``cpu_mirror=True``.
+To read a GPU stream's **CPU mirror** without attaching a CUDA tensor — even on
+a host that *has* CUDA, where the default would otherwise attach to the GPU —
+pass ``gpu_device=False``.  This requires the stream to have been created with
+``cpu_mirror=True`` and makes :meth:`~pyshmem.SharedMemory.read` return a
+:class:`numpy.ndarray`:
+
+.. code-block:: python
+
+   reader = pyshmem.open("my_gpu_stream", gpu_device=False)
+   frame = reader.read()                           # numpy.ndarray from the mirror
+
+If CUDA cannot be attached at all (no CUDA in this process, or the producer has
+exited), :func:`~pyshmem.open` falls back to the CPU mirror automatically when
+one exists, and otherwise raises a clear error.  See :doc:`gpu` for the full
+GPU model.
 
 Writing data
 ------------
@@ -244,21 +265,26 @@ step:
 Discovering streams
 -------------------
 
-:func:`pyshmem.list_streams` returns the segment base names of all existing
-pyshmem streams found in ``/dev/shm/``.  It is available on Linux and returns
-an empty list on other platforms.
+:func:`pyshmem.list_streams` returns the sorted **user-visible names** of all
+existing pyshmem streams found in ``/dev/shm/``.  It is available on Linux and
+returns an empty list on other platforms.
 
 .. code-block:: python
 
    pyshmem.list_streams()
-   # ['ps_1a2b3c4d5e6f70', 'ps_7e8f9a0b1c2d3e']
+   # ['my_gpu_stream', 'my_stream']
 
 .. note::
 
-   Stream names are stored as SHA-1 hashes internally.  ``list_streams()``
-   returns the hashed segment identifiers (``ps_<hash>``), not the
-   user-visible names passed to :func:`~pyshmem.create`.  If you know the
-   name you are looking for, use :func:`pyshmem.open` directly.
+   Segment names are stored internally as SHA-1 hashes (``ps_<hash>``) to stay
+   under the POSIX name-length limit, but the original name passed to
+   :func:`~pyshmem.create` is recorded in each stream's metadata, so
+   ``list_streams()`` reports the friendly name.  Streams created by very old
+   pyshmem versions that did not record the name fall back to their hashed
+   ``ps_<hash>`` identifier.
+
+The same listing is available from the shell with ``pyshmem list`` — see
+:doc:`cli`.
 
 Inspecting streams
 ------------------

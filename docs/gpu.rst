@@ -77,8 +77,8 @@ Behaviour:
 
 - No CPU mirror is maintained.  Every write goes straight to the CUDA tensor.
 - Fastest path — avoids the GPU→CPU copy on every write.
-- CPU-only handles (opened without ``gpu_device=``) can still inspect metadata
-  and take locks, but ``read()`` and ``write()`` raise :class:`RuntimeError`.
+- A process without access to the stream's CUDA device cannot read it: there is
+  no mirror to fall back on, so :func:`~pyshmem.open` raises a clear error.
 - Intended for GPU-heavy pipelines where throughput matters most.
 
 Compatibility mode
@@ -110,16 +110,41 @@ Behaviour:
 Opening GPU streams in another process
 ---------------------------------------
 
-Always pass ``gpu_device`` when you want a CUDA tensor view:
+:func:`~pyshmem.open` reconstructs the stream as it was created.  For a GPU
+stream it **auto-attaches to the CUDA device recorded in metadata** — you do
+not need to pass ``gpu_device``:
 
 .. code-block:: python
 
-   reader = pyshmem.open("activations", gpu_device="cuda:0")
-   tensor = reader.read()   # torch.Tensor on cuda:0
+   reader = pyshmem.open("activations")    # auto-attaches to its cuda:N
+   tensor = reader.read()                  # torch.Tensor on that device
 
-Omitting ``gpu_device`` gives a CPU-only handle.  On a stream created with
-``cpu_mirror=True``, this still allows ``read()`` and ``write()``.  On a stream
-without a CPU mirror, it restricts the handle to metadata and locking only.
+An explicit ``gpu_device="cuda:N"`` is validated against the stored device and
+must match.
+
+To read the **CPU mirror** of a ``cpu_mirror=True`` stream as a NumPy array —
+without attaching the producer's CUDA tensor, even on a CUDA-capable host —
+pass ``gpu_device=False``:
+
+.. code-block:: python
+
+   reader = pyshmem.open("activations", gpu_device=False)
+   frame = reader.read()                   # numpy.ndarray from the mirror
+
+This is the supported way for CPU-side consumers (viewers, loggers, external
+tooling) to read a GPU stream's host mirror from a process that happens to also
+have CUDA available.  It raises :class:`ValueError` if the stream has no CPU
+mirror.
+
+Fallback behaviour
+^^^^^^^^^^^^^^^^^^
+
+When ``gpu_device`` is left at its default and the CUDA device cannot be
+attached — because this process has no CUDA, or because the producer has
+exited and released its tensor — :func:`~pyshmem.open` falls back to the CPU
+mirror if the stream has one (returning a NumPy-backed handle), and otherwise
+raises a clear :class:`RuntimeError`.  An explicit ``gpu_device=`` does **not**
+fall back: a failed attach is fatal, so misconfiguration surfaces immediately.
 
 Thread safety
 -------------
@@ -133,8 +158,32 @@ GPU handle reconstruction happens at most once per (stream, process) pair.
 Subsequent opens in the same process reuse the cached
 :class:`torch.Tensor` from an internal weakref cache.
 
+How cross-process GPU sharing works
+-----------------------------------
+
+GPU streams share tensors across processes using torch's official reduction
+path: the producer exports its tensor with
+:func:`torch.multiprocessing.reductions.reduce_tensor` and stores the pickled
+``(rebuild_fn, args)`` payload in the stream's GPU handle segment; each consumer
+reconstructs the tensor with ``rebuild_fn(*args)``.  Using the official path
+(rather than calling ``storage._share_cuda_()`` directly) keeps torch's IPC
+reference counter correct, which is what lets the producer reclaim GPU memory
+once consumers release.
+
+This has consequences for memory lifecycle:
+
+- **Consumers** drop their CUDA tensor on :meth:`~pyshmem.SharedMemory.close`,
+  which decrements the producer's IPC reference counter.
+- The **owner** keeps its tensor on ``close()`` (so the stream stays mappable
+  in-process) and releases it only on :meth:`~pyshmem.SharedMemory.unlink`,
+  which also calls :func:`torch.cuda.ipc_collect`.
+- If a producer dies without unlinking, it can leave orphaned ``cuda.shm.*``
+  reference-count files behind.  :func:`pyshmem.purge` (and ``pyshmem purge``
+  on the CLI) sweeps those for processes that are no longer alive — see
+  :doc:`cli`.
+
 Platform note
 -------------
 
-GPU IPC via ``torch.UntypedStorage._share_cuda_()`` has been tested on Linux.
-macOS does not support CUDA.  Windows is not tested for GPU streams.
+GPU IPC has been tested on Linux.  macOS does not support CUDA.  Windows is not
+tested for GPU streams.

@@ -64,6 +64,7 @@ with pyshmem.stream("tmp2", shape=(10,)) as shm:   # always auto-unlinks
 shm = pyshmem.open("my_stream")
 shm = pyshmem.open("my_gpu_stream")                 # auto-attaches to its cuda:N
 shm = pyshmem.open("my_gpu_stream", gpu_device="cuda:0")  # explicit (must match)
+shm = pyshmem.open("my_gpu_stream", gpu_device=False)    # CPU-mirror only (no GPU attach; requires cpu_mirror=True)
 
 # Discover
 pyshmem.list_streams()    # returns sorted list of user-visible stream names
@@ -116,7 +117,7 @@ pyshmem purge                    # remove ALL pyshmem segments + orphaned cuda.s
 
 - **`create()`** calls `SharedMemory._create()` which creates segments atomically (with cleanup on failure).
 - **`open()`** calls `SharedMemory._open()` which reads metadata to reconstruct shape/dtype without needing the caller to know them.
-- **`open()` reconstructs the stream as created** (`_resolve_open_target_device`): for a GPU stream it auto-attaches to the stored device (`METADATA_INDEX_DEVICE_INDEX`) even when the caller omits `gpu_device`. If the device can't be attached, it falls back to the CPU mirror when one exists (e.g. the producer exited but `cpu_mirror=True`), and otherwise raises a clear error. An explicit `gpu_device=` is validated against the stored device and, if it can't attach, raises rather than falling back.
+- **`open()` reconstructs the stream as created** (`_resolve_open_target_device`): for a GPU stream it auto-attaches to the stored device (`METADATA_INDEX_DEVICE_INDEX`) even when the caller omits `gpu_device`. If the device can't be attached, it falls back to the CPU mirror when one exists (e.g. the producer exited but `cpu_mirror=True`), and otherwise raises a clear error. An explicit `gpu_device=` is validated against the stored device and, if it can't attach, raises rather than falling back. Passing `gpu_device=False` opts out of attaching the producer's CUDA tensor entirely and reads the host mirror as a NumPy array — the way to consume a GPU stream's mirror from a CUDA-capable process (where the default would auto-attach to the GPU). It requires `cpu_mirror=True` and otherwise raises `ValueError`.
 - **Resource tracker suppression**: `_unregister()` removes segments from Python's `resource_tracker` so child process exits don't spuriously warn about leaked shared memory.
 - **Platform**: Full Linux support. macOS: GPU IPC is not tested. Windows: uses named shared memory (no POSIX shm_unlink).
 
