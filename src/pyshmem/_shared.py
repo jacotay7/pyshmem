@@ -1007,7 +1007,7 @@ class SharedMemory:
         cls,
         name: str,
         *,
-        gpu_device: str | int | None = None,
+        gpu_device: str | int | bool | None = None,
     ) -> "SharedMemory":
         try:
             metadata_shm = shared_memory.SharedMemory(
@@ -1050,7 +1050,17 @@ class SharedMemory:
         gpu_tensor = None
         gpu_handle_shm = None
         torch_dtype = None
-        if gpu_enabled:
+        if gpu_enabled and gpu_device is False:
+            # Explicit CPU-only attach: read the host mirror without mapping
+            # the producer's CUDA tensor.  Only viable when a mirror exists.
+            if not cpu_mirror_enabled:
+                metadata_shm.close()
+                data_shm.close()
+                raise ValueError(
+                    f"{name!r} is a GPU stream without a CPU mirror; cannot "
+                    "open it CPU-only (recreate it with cpu_mirror=True)"
+                )
+        elif gpu_enabled:
             try:
                 target_device, strict = _resolve_open_target_device(
                     name, device_index, gpu_device, cpu_mirror_enabled
@@ -1546,8 +1556,20 @@ def create(
     return shm
 
 
-def open(name: str, *, gpu_device: str | int | None = None) -> SharedMemory:
-    """Attach to an existing named shared-memory stream."""
+def open(
+    name: str, *, gpu_device: str | int | bool | None = None
+) -> SharedMemory:
+    """Attach to an existing named shared-memory stream.
+
+    For a GPU stream, ``gpu_device=None`` (the default) auto-attaches to the
+    CUDA device recorded in metadata; an explicit ``gpu_device='cuda:N'`` must
+    match the stored device.  Pass ``gpu_device=False`` to open a GPU stream
+    *CPU-only* — the producer's CUDA tensor is not mapped and :meth:`read`
+    returns the host mirror as a NumPy array.  This requires the stream to have
+    been created with ``cpu_mirror=True`` and is the way to consume a GPU
+    stream's mirror from a process that also has CUDA available (where the
+    default would otherwise attach to the GPU).
+    """
     return SharedMemory._open(name, gpu_device=gpu_device)
 
 

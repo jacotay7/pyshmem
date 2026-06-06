@@ -179,6 +179,46 @@ def test_open_auto_attaches_gpu_even_with_cpu_mirror(shm_name):
 
 
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_open_cpu_only_reads_mirror_even_when_cuda_available(shm_name):
+    # gpu_device=False opts out of attaching the producer's CUDA tensor and
+    # reads the host mirror as a NumPy array, even on a CUDA-capable host.
+    writer = pyshmem.create(
+        shm_name,
+        shape=(2, 2),
+        dtype=np.float32,
+        gpu_device="cuda:0",
+        cpu_mirror=True,
+    )
+    payload = np.arange(4, dtype=np.float32).reshape(2, 2)
+    writer.write(payload)
+
+    reader = pyshmem.open(shm_name, gpu_device=False)
+
+    assert reader.gpu_device is None  # no GPU attachment
+    assert reader.cpu_mirror is True
+    received = reader.read()
+    assert isinstance(received, np.ndarray)
+    np.testing.assert_array_equal(received, payload)
+
+    reader.close()
+    writer.close()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_open_cpu_only_raises_without_cpu_mirror(shm_name):
+    # A GPU stream with no mirror cannot be opened CPU-only.
+    writer = pyshmem.create(
+        shm_name, shape=(2, 2), dtype=np.float32, gpu_device="cuda:0"
+    )
+    writer.write(np.ones((2, 2), dtype=np.float32))
+
+    with pytest.raises(ValueError, match="without a CPU mirror"):
+        pyshmem.open(shm_name, gpu_device=False)
+
+    writer.close()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
 def test_open_falls_back_to_cpu_mirror_when_cuda_unavailable(
     shm_name, monkeypatch
 ):
