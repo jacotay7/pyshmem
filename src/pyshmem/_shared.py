@@ -1281,8 +1281,13 @@ class SharedMemory:
         timeout: float | None = None,
         safe: bool = True,
         poll_interval: float = 1e-5,
+        out=None,
     ):
-        """Block until a new write arrives, then return its payload."""
+        """Block until a new write arrives, then return its payload.
+
+        ``out`` is forwarded to :meth:`read`: a pre-allocated NumPy array
+        receives the payload directly (zero-alloc) for CPU streams.
+        """
         self._ensure_open("read from")
         baseline = self.count
         start = time.monotonic()
@@ -1297,7 +1302,7 @@ class SharedMemory:
                     f"timed out waiting for a new write on {self.name!r}"
                 )
             time.sleep(poll_interval)
-        return self.read(safe=safe)
+        return self.read(safe=safe, out=out)
 
     def write_locked(self, value: Any) -> None:
         """Write a payload without acquiring the lock.
@@ -1349,6 +1354,7 @@ class SharedMemory:
         timeout: float | None = None,
         safe: bool = True,
         poll_interval: float = 1e-5,
+        out=None,
     ):
         """Async variant of :meth:`read_new` that yields to the event loop.
 
@@ -1368,7 +1374,7 @@ class SharedMemory:
                     f"timed out waiting for a new write on {self.name!r}"
                 )
             await asyncio.sleep(poll_interval)
-        return self.read(safe=safe)
+        return self.read(safe=safe, out=out)
 
     def describe(self) -> str:
         """Return a human-readable summary of the stream's metadata."""

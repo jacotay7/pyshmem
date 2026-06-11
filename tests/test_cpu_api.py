@@ -1229,3 +1229,49 @@ def test_cli_no_command_exits_nonzero(capsys):
 
     exit_code = cli.main([])
     assert exit_code == 1
+
+
+def test_read_new_writes_into_preallocated_out_buffer(shm_name):
+    shm = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
+    try:
+        shm.write(np.zeros(4, dtype=np.float32))
+        buffer = np.empty(4, dtype=np.float32)
+
+        writer = threading.Thread(
+            target=lambda: (
+                time.sleep(0.05),
+                shm.write(np.arange(4, dtype=np.float32)),
+            )
+        )
+        writer.start()
+        result = shm.read_new(timeout=5.0, out=buffer)
+        writer.join()
+
+        assert result is buffer
+        assert np.array_equal(buffer, np.arange(4, dtype=np.float32))
+    finally:
+        shm.close()
+
+
+def test_read_new_async_forwards_out_buffer(shm_name):
+    shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float64)
+    try:
+        buffer = np.empty(2, dtype=np.float64)
+
+        async def scenario():
+            writer = threading.Thread(
+                target=lambda: (
+                    time.sleep(0.05),
+                    shm.write(np.array([5.0, 6.0])),
+                )
+            )
+            writer.start()
+            result = await shm.read_new_async(timeout=5.0, out=buffer)
+            writer.join()
+            return result
+
+        result = asyncio.run(scenario())
+        assert result is buffer
+        assert np.array_equal(buffer, [5.0, 6.0])
+    finally:
+        shm.close()
