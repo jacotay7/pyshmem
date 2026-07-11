@@ -3179,7 +3179,10 @@ def open(
 
 @contextmanager
 def locked_many(
-    streams: Sequence[SharedMemory], *, timeout: float | None = None
+    streams: Sequence[SharedMemory],
+    *,
+    timeout: float | None = None,
+    poll_interval: float = 1e-3,
 ):
     """Acquire several streams in deterministic name order.
 
@@ -3194,6 +3197,8 @@ def locked_many(
         raise ValueError("locked_many() requires unique stream names")
     if timeout is not None and float(timeout) < 0.0:
         raise ValueError("timeout must be non-negative")
+    if not math.isfinite(float(poll_interval)) or float(poll_interval) <= 0.0:
+        raise ValueError("poll_interval must be positive")
     deadline = None if timeout is None else time.monotonic() + float(timeout)
     with ExitStack() as stack:
         for handle in sorted(handles, key=lambda item: item.name):
@@ -3202,7 +3207,12 @@ def locked_many(
                 if deadline is None
                 else max(0.0, deadline - time.monotonic())
             )
-            stack.enter_context(handle.locked(timeout=remaining))
+            stack.enter_context(
+                handle.locked(
+                    timeout=remaining,
+                    poll_interval=float(poll_interval),
+                )
+            )
         yield handles
 
 

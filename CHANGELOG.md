@@ -3,6 +3,13 @@
 All notable user-facing changes are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## 1.1.1 - 2026-07-11
+
+### Integration and performance
+
+- Added `poll_interval` to `pyshmem.locked_many()`, forwarding the setting to
+  each stream lock acquisition for low-latency multi-stream consumers.
+
 ## 1.1.0 - 2026-07-11
 
 ### Integration and performance

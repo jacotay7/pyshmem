@@ -399,11 +399,15 @@ already hold a lock while coordinating several streams:
            kernel.compute_into(input_frame, output, auxiliaries)
 
 For a multi-stream pipeline, :func:`pyshmem.locked_many` acquires handles in
-deterministic name order with one shared timeout deadline:
+deterministic name order with one shared timeout deadline. ``poll_interval``
+controls retry cadence for each cross-process lock, which is useful for
+low-latency contended pipelines:
 
 .. code-block:: python
 
-   with pyshmem.locked_many([input_stream, output_stream], timeout=1.0):
+   with pyshmem.locked_many(
+       [input_stream, output_stream], timeout=1.0, poll_interval=2e-5
+   ):
        input_view = input_stream.read(safe=False)
        with output_stream.write_view_locked() as output:
            kernel.compute_into(input_view, output, {})

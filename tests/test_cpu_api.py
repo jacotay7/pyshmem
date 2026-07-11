@@ -138,6 +138,18 @@ def test_locked_many_acquires_unique_handles_and_rejects_duplicates(shm_name):
     second.unlink()
 
 
+def test_locked_many_validates_and_honors_poll_interval(shm_name):
+    stream = pyshmem.create(shm_name, shape=(1,), dtype=np.float32)
+    try:
+        with pyshmem.locked_many([stream], timeout=1.0, poll_interval=2e-5):
+            assert stream._lock_state.depth == 1
+        with pytest.raises(ValueError, match="poll_interval"):
+            with pyshmem.locked_many([stream], poll_interval=0.0):
+                pass
+    finally:
+        stream.unlink()
+
+
 def test_create_write_read_round_trip_cpu(shm_name):
     shm = pyshmem.create(shm_name, shape=(2, 3), dtype=np.float32)
 
