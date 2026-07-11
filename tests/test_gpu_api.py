@@ -181,6 +181,39 @@ def test_open_rejects_tampered_gpu_handle_payload(shm_name):
 
 
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_cuda_failure_during_publication_is_recoverable(shm_name, monkeypatch):
+    shm = pyshmem.create(
+        shm_name, shape=(4,), dtype=np.float32, gpu_device="cuda:0"
+    )
+    shm.write(torch.zeros(4, device="cuda:0"))
+
+    # A CUDA error surfacing during publication (here at synchronize, after
+    # the device copy is enqueued) must leave the stream in the invalid state,
+    # not a half-published one, and a later good write must repair it.
+    real_sync = pyshmem_shared.torch.cuda.synchronize
+
+    def failing_sync(*args, **kwargs):
+        raise RuntimeError("injected cuda failure")
+
+    monkeypatch.setattr(pyshmem_shared.torch.cuda, "synchronize", failing_sync)
+    with pytest.raises(RuntimeError, match="injected cuda failure"):
+        shm.write(torch.ones(4, device="cuda:0"))
+    monkeypatch.setattr(pyshmem_shared.torch.cuda, "synchronize", real_sync)
+
+    assert shm.write_sequence < 0
+    with pytest.raises(pyshmem.InconsistentStreamError):
+        shm.read(timeout=1.0)
+
+    replacement = torch.full((4,), 5.0, device="cuda:0")
+    shm.write(replacement)
+    assert shm.write_sequence > 0 and shm.write_sequence % 2 == 0
+    assert torch.equal(shm.read().cpu(), replacement.cpu())
+
+    shm.close()
+    pyshmem.unlink(shm_name)
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
 def test_open_auto_attaches_to_stored_gpu_device(shm_name):
     # open() reconstructs the stream as created: it attaches to the CUDA device
     # recorded in metadata without the caller having to pass gpu_device.

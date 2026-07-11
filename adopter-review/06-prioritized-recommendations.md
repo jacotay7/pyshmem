@@ -12,10 +12,10 @@ Detailed evidence is in [Implementation status](00-implementation-status.md).
   metadata magic, namespaces, and dry-run remain.
 - P0.5: **implemented at the generation protocol level**; cross-process CUDA
   events and asynchronous stream ordering remain.
-- P1.5: **substantially implemented on CPU** with failed-copy, writer-kill,
-  timeout, descriptor, purge, GPU odd-sequence, truncated-metadata,
-  repeated-writer-kill, and multi-writer contention tests. Fork/spawn
-  inheritance and CUDA-error-after-odd-publish (GPU-only) remain.
+- P1.5: **substantially implemented** with failed-copy, writer-kill, timeout,
+  descriptor, purge, GPU odd-sequence, truncated-metadata, repeated-writer-kill,
+  multi-writer contention, and GPU CUDA-failure-during-publication tests.
+  Fork/spawn inheritance is the last open item.
 - P1.3: **substantially implemented** — segment open/create goes through
   `_attach_segment()`, which uses the public `track=False` on Python 3.13+ and
   only falls back to the private `resource_tracker` API on <=3.12; and the
