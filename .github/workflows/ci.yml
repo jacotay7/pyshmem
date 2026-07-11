@@ -24,7 +24,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip pip-audit
           python -m pip install -e .
-          pip-audit --local --strict
+          # --skip-editable excludes pyshmem itself (installed editable): the
+          # project's own about-to-be-released version is never on PyPI, so
+          # auditing it would always fail. Runtime deps are still audited.
+          pip-audit --local --strict --skip-editable
 
   lint:
     runs-on: ubuntu-latest

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -11,17 +12,34 @@ import numpy as np
 import pytest
 
 import pyshmem
-from benchmarks import benchmark_ipc
+
+_BENCHMARK_SCRIPT = (
+    Path(__file__).parents[1] / "benchmarks" / "benchmark_ipc.py"
+)
+
+
+def _load_benchmark_ipc():
+    # Load the script by path rather than ``from benchmarks import ...``: the
+    # repo root is not on sys.path under the ``pytest`` console script (only
+    # under ``python -m pytest``), so a package import would fail in CI.
+    spec = importlib.util.spec_from_file_location(
+        "pyshmem_benchmark_ipc", _BENCHMARK_SCRIPT
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+benchmark_ipc = _load_benchmark_ipc()
 
 pytestmark = [pytest.mark.cpu, pytest.mark.benchmark]
 
 
 def test_spawned_process_benchmark_smoke():
-    script = Path(__file__).parents[1] / "benchmarks" / "benchmark_ipc.py"
     completed = subprocess.run(
         [
             sys.executable,
-            str(script),
+            str(_BENCHMARK_SCRIPT),
             "--payload-bytes",
             "128",
             "--minimum-seconds",
