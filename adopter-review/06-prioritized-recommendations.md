@@ -16,10 +16,12 @@ Detailed evidence is in [Implementation status](00-implementation-status.md).
   timeout, descriptor, purge, GPU odd-sequence, truncated-metadata,
   repeated-writer-kill, and multi-writer contention tests. Fork/spawn
   inheritance and CUDA-error-after-odd-publish (GPU-only) remain.
-- P1.3: **partially implemented** — segment open/create goes through
+- P1.3: **substantially implemented** — segment open/create goes through
   `_attach_segment()`, which uses the public `track=False` on Python 3.13+ and
-  only falls back to the private `resource_tracker` API on <=3.12. Isolating the
-  pickled CUDA reduction trust boundary remains.
+  only falls back to the private `resource_tracker` API on <=3.12; and the
+  pickled CUDA reduction is now deserialized through an authenticating
+  `_RestrictedCudaUnpickler` (GPU-validated) that rejects tampered payloads.
+  Only reliance on torch's private `rebuild_cuda_tensor` internals remains.
 - P1.6: **repository documentation corrected**; hosted docs still need rebuild.
 - Repository hygiene: Python 3.9 CI, complete sdist tests, and obsolete artifact
   removal are **implemented**.

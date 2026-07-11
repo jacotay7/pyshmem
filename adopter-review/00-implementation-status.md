@@ -29,6 +29,7 @@ Scope: first remediation batch following the critical adopter review
 | Unlink/recreate lock-inode generation | Done | `_SharedLockState` records the lock file's inode and rebinds a stale handle on each acquire when the pathname resolves to a new inode, so a stream destroyed and recreated while old handles are live reconverges on one shared lock instead of splitting into per-generation locks. Regression tests cover the refresh mechanism and post-recreate convergence (verified load-bearing against a disabled-refresh baseline); `docs/platforms.rst` documents the semantics. |
 | Private resource-tracker API | Done | All segment open/create paths go through `_attach_segment()`, which uses the public `track=False` argument on Python 3.13+ and only falls back to the private `resource_tracker.unregister` on <=3.12. Tests assert the capability probe matches the `SharedMemory` signature and that `_attach_segment` branches correctly (track-false path never unregisters; fallback path does). The pickled CUDA reduction trust boundary is a separate, still-open item. |
 | Fault testing: metadata/kills/contention | Done (CPU scope) | Added CPU regression tests for a truncated metadata segment (clean rejection), repeated writer kills each recovering to `InconsistentStreamError` then repairing, and concurrent multi-writer/reader contention proving no torn seqlock snapshots and no deadlock (stable across 10 repeats). Fork inheritance and CUDA-failure-during-publication remain open (the latter is GPU-only). |
+| Pickle CUDA trust boundary | Done | GPU handle reconstruction no longer calls raw `pickle.loads` on the writable 0600 segment. `_RestrictedCudaUnpickler` permits only torch's known CUDA rebuild globals and inert dtype values, so a tampered payload raises `UnpicklingError` instead of executing code. Validated on an RTX 5090: a legit reduction still round-trips, a child opening a tampered handle fails with `disallowed global`, and a torch-independent CPU test covers the rejection path. Documented in `docs/format.rst` and CLAUDE.md. |
 
 ## Verification record
 
@@ -62,11 +63,12 @@ precisely isolating that lifecycle warning remains open.
    Lock-inode generation and stale-handle reconvergence are handled; data and
    metadata segment recreation while consumers hold prior mappings still needs
    explicit documentation and coverage.
-4. Replace or tightly isolate the pickled CUDA reduction trust boundary. The
-   private `resource_tracker` reach-in is now avoided on Python 3.13+ via public
-   `track=False`; the remaining work is the pickle trust boundary (data-only or
-   authenticated CUDA handle schema) and any residual private PyTorch reduction
-   internals.
+4. Residual private PyTorch reduction internals. The pickle trust boundary is
+   now closed with an authenticating restricted unpickler, and the private
+   `resource_tracker` reach-in is avoided on Python 3.13+ via public
+   `track=False`. What remains is that reconstruction still depends on torch's
+   private `rebuild_cuda_tensor`/`_lazy_init` internals, which carry no stable
+   API guarantee across torch versions.
 5. Expand fault testing. Malformed/truncated metadata, repeated writer kills,
    and multi-writer contention now have CPU regression tests. Fork inheritance
    and CUDA-failure-during-publication remain (the latter needs GPU hardware).

@@ -131,6 +131,56 @@ def test_create_write_read_round_trip_gpu(shm_name):
 
 
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_handle_reconstructs_through_restricted_unpickler(shm_name):
+    # A legitimate torch reduction payload must still round-trip: the GPU
+    # handle is deserialized via the restricted unpickler, not raw
+    # pickle.loads.
+    writer = pyshmem.create(
+        shm_name, shape=(3,), dtype=np.float32, gpu_device="cuda:0"
+    )
+    writer.write(torch.tensor([4.0, 5.0, 6.0], device="cuda:0"))
+    reader = pyshmem.open(shm_name)
+    assert torch.equal(reader.read().cpu(), torch.tensor([4.0, 5.0, 6.0]))
+    reader.close()
+    writer.close()
+    pyshmem.unlink(shm_name)
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_open_rejects_tampered_gpu_handle_payload(shm_name):
+    import pickle
+
+    writer = pyshmem.create(
+        shm_name, shape=(3,), dtype=np.float32, gpu_device="cuda:0"
+    )
+    writer.write(torch.zeros(3, device="cuda:0"))
+
+    # A same-account attacker overwrites the writable 0600 handle segment with
+    # a payload that would execute code under raw pickle.loads.  The restricted
+    # unpickler must refuse it rather than run it.  Reconstruction only runs in
+    # a non-creator process, so a child performs the open.
+    class _Evil:
+        def __reduce__(self):
+            return (os.system, ("echo tampered",))
+
+    evil = pickle.dumps(_Evil(), protocol=4)
+    handle = pyshmem_shared._attach_segment(
+        pyshmem_shared._gpu_handle_name(shm_name)
+    )
+    try:
+        handle.buf[: len(evil)] = evil
+    finally:
+        handle.close()
+
+    child = _run_python_child(f"import pyshmem; pyshmem.open({shm_name!r})")
+    assert child.returncode != 0, child.stdout
+    assert "disallowed global in GPU handle payload" in child.stderr
+
+    writer.close()
+    pyshmem.unlink(shm_name)
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
 def test_open_auto_attaches_to_stored_gpu_device(shm_name):
     # open() reconstructs the stream as created: it attaches to the CUDA device
     # recorded in metadata without the caller having to pass gpu_device.

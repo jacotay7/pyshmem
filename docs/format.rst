@@ -183,3 +183,14 @@ The CPU payload is a contiguous C-order array whose byte count must equal the
 product of shape and dtype item size. GPU streams additionally store a serialized
 PyTorch reduction in the ``_gpu`` segment; this is an implementation-dependent,
 trusted-process interface rather than part of the stable metadata format.
+
+The ``_gpu`` segment holds torch's official ``reduce_tensor`` output
+(``rebuild_cuda_tensor`` plus primitive arguments) pickled for cross-process
+tensor reconstruction. Because the segment is writable (mode 0600, so exposure
+is limited to the same OS account), pyshmem deserializes it with a **restricted
+unpickler** that only resolves torch's known CUDA rebuild globals and inert
+dtype values. A tampered payload raises ``UnpicklingError`` instead of executing
+arbitrary code, so the trust boundary is the set of processes that can write the
+segment (same-account producers), not any code they could smuggle into it.
+Reconstruction still assumes a live, trusted producer for the CUDA IPC handle
+itself.

@@ -330,6 +330,27 @@ def test_attach_segment_falls_back_to_unregister_when_unsupported(monkeypatch):
     assert unregistered == [result]
 
 
+def test_restricted_cuda_unpickler_rejects_dangerous_globals():
+    import pickle
+
+    # A payload that would execute code under raw pickle.loads must be refused
+    # by the restricted unpickler used for GPU handle reconstruction.  This
+    # path is torch-independent, so it is exercised even on CPU-only runners.
+    class _Evil:
+        def __reduce__(self):
+            return (os.system, ("echo tampered",))
+
+    evil = pickle.dumps(_Evil(), protocol=4)
+    with pytest.raises(pyshmem_shared.pickle.UnpicklingError) as exc_info:
+        pyshmem_shared._loads_cuda_handle(evil)
+    assert "disallowed global" in str(exc_info.value)
+
+    # An explicitly dangerous builtin is likewise rejected.
+    eval_ref = pickle.dumps(eval, protocol=4)
+    with pytest.raises(pyshmem_shared.pickle.UnpicklingError):
+        pyshmem_shared._loads_cuda_handle(eval_ref)
+
+
 def test_cross_process_lock_blocks_explicit_acquire_until_release(shm_name):
     writer = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
     payload = np.arange(4, dtype=np.float32)

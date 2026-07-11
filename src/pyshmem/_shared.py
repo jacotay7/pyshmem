@@ -20,6 +20,7 @@ import builtins
 from contextlib import contextmanager
 import glob
 import inspect
+import io
 import math
 import os
 import pickle
@@ -2050,6 +2051,47 @@ class SharedMemory:
             pass
 
 
+# torch's official CUDA reduction pickles ``(rebuild_cuda_tensor, args)`` where
+# every arg is a primitive or one of a small, fixed set of torch types.  The
+# GPU handle segment is writable (mode 0600), so any same-account process that
+# can alter it could otherwise make a later attacher ``pickle.loads`` arbitrary
+# code.  We reconstruct through a restricted unpickler that only resolves those
+# known globals, turning tampering into a clean ``UnpicklingError`` instead of
+# code execution while keeping torch's official, version-portable format.
+_ALLOWED_CUDA_GLOBALS = frozenset(
+    {
+        ("torch.multiprocessing.reductions", "rebuild_cuda_tensor"),
+        ("torch", "Tensor"),
+        ("torch", "Size"),
+        ("torch.storage", "TypedStorage"),
+        ("torch.storage", "_TypedStorage"),
+        ("collections", "OrderedDict"),
+    }
+)
+
+
+class _RestrictedCudaUnpickler(pickle.Unpickler):
+    """Unpickler that only permits torch's CUDA rebuild globals."""
+
+    def find_class(self, module: str, name: str):
+        if (module, name) in _ALLOWED_CUDA_GLOBALS:
+            return super().find_class(module, name)
+        # torch dtype singletons (e.g. ``torch.float32``) are inert data values
+        # referenced as globals by the reduction payload.
+        if module == "torch" and torch is not None:
+            candidate = getattr(torch, name, None)
+            if isinstance(candidate, torch.dtype):
+                return candidate
+        raise pickle.UnpicklingError(
+            f"disallowed global in GPU handle payload: {module}.{name}"
+        )
+
+
+def _loads_cuda_handle(data: bytes):
+    """Deserialize a CUDA IPC handle payload via the restricted unpickler."""
+    return _RestrictedCudaUnpickler(io.BytesIO(data)).load()
+
+
 def _create_gpu_tensor_and_handle(
     *, name: str, shape: tuple[int, ...], torch_dtype, gpu_device: Any
 ):
@@ -2105,7 +2147,7 @@ def _open_gpu_tensor_from_handle(
             return gpu_tensor, None
 
         handle_shm = _attach_segment(_gpu_handle_name(name))
-        rebuild_fn, rebuild_args = pickle.loads(bytes(handle_shm.buf))
+        rebuild_fn, rebuild_args = _loads_cuda_handle(bytes(handle_shm.buf))
 
         torch.cuda._lazy_init()
         # ``rebuild_fn`` is torch's ``rebuild_cuda_tensor``; it maps the IPC

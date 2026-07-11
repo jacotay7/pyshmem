@@ -15,8 +15,11 @@ item described below:
 - no-mirror GPU reads wait/recheck the sequence around clone+synchronize.
 
 The original sections are retained as the evidence that motivated each change.
-The unspecified atomic memory model, pickle trust boundary, private APIs, and
-CUDA lifecycle warning remain open.
+Since then the memory model has been specified (with narrowed platform claims),
+the pickle trust boundary closed with a restricted unpickler, and the private
+`resource_tracker` reach-in avoided on Python 3.13+. A hardware-enforced atomic
+memory model, reliance on torch's private reduction internals, and the CUDA
+lifecycle warning remain open.
 
 ## P0: a failed or crashed write can block readers forever
 
@@ -137,16 +140,19 @@ atomicity, and compatibility of the on-memory format.
 
 ## P1: unpickling a writable shared segment is a local code-execution boundary
 
-GPU attachment runs `pickle.loads(bytes(handle_shm.buf))`. The segment is
-created mode 0600 on this machine, limiting exposure to the same OS account, but
-any process under that account that can alter the segment can make a later
-attacher unpickle arbitrary content. This is unsafe in notebook servers,
-multi-service accounts, and compromised-worker models.
-
-Store and validate a data-only CUDA handle schema rather than a pickled callable,
-or authenticate the handle and narrowly reconstruct a known function with
-validated primitive arguments. The trust boundary must be documented if the
-PyTorch reduction format makes this unavoidable.
+**Resolved.** GPU attachment previously ran `pickle.loads(bytes(handle_shm.buf))`
+on the writable mode-0600 segment, so any same-account process that could alter
+it could make a later attacher unpickle arbitrary content. Reconstruction now
+goes through `_RestrictedCudaUnpickler`, whose `find_class` resolves only torch's
+known CUDA rebuild globals (`rebuild_cuda_tensor`, `Tensor`, `Size`,
+`TypedStorage`) and inert dtype values; anything else raises `UnpicklingError`
+before code runs. This is the review's "authenticate the handle and narrowly
+reconstruct a known function" option, keeping torch's version-portable reduction
+format. Validated on an RTX 5090 (legit round-trip plus a tampered-handle child
+rejected with `disallowed global`) with a torch-independent CPU rejection test,
+and documented in `docs/format.rst`. The remaining exposure is the set of
+same-account processes that can write the segment, plus reliance on torch's
+private `rebuild_cuda_tensor` internals.
 
 ## Additional reliability concerns
 
