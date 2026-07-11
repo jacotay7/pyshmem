@@ -12,10 +12,10 @@ A **stream** is a named slot in shared memory with a fixed shape, dtype, and sto
 ### Internal segments
 Each logical stream `name` maps to up to three POSIX shared-memory segments:
 - **data segment** — the array payload (`ps_<sha1hash>`)
-- **metadata segment** — a `float64[32]` array followed by a 256-byte name region (`ps_<sha1hash>_meta`)
+- **metadata segment** — a 256-byte structured header (v3; legacy v2 was `float64[32]`) followed by a 256-byte name region (`ps_<sha1hash>_meta`)
 - **GPU handle segment** — torch `reduce_tensor()` payload (`(rebuild_fn, args)`, pickled) for cross-process GPU tensor reconstruction (`ps_<sha1hash>_gpu`)
 
-Names are hashed (SHA-1, first 14 chars) to stay under the POSIX segment name limit while remaining collision-resistant. Because the hash is one-way, the original user-visible name is stored verbatim in the metadata segment's name region (UTF-8, null-padded, after the float64 block) so `list_streams()`/the CLI can report the friendly name. `METADATA_TOTAL_BYTES = METADATA_BYTES (256) + METADATA_NAME_MAX (256)`; discovery and purge ignore legacy/unrelated segments whose stored friendly name cannot be validated against the hash.
+Names are hashed (SHA-1, first 14 chars) to stay under the POSIX segment name limit while remaining collision-resistant. Because the hash is one-way, the original user-visible name is stored verbatim in the metadata segment's name region (UTF-8, null-padded, after the header block) so `list_streams()`/the CLI can report the friendly name. `METADATA_TOTAL_BYTES = METADATA_BYTES (256) + METADATA_NAME_MAX (256)`; discovery and purge ignore legacy/unrelated segments whose stored friendly name cannot be validated against the hash.
 
 ### Metadata layout (METADATA_INDEX_* constants)
 New streams use metadata version 3: a fixed 256-byte, little-endian structured header with magic, version/header size, flags, fixed-width dtype/shape/lifecycle fields, aligned uint64 count and int64 write sequence, followed by the 256-byte user-visible name region. `_MetadataView` preserves the existing internal index interface and can also attach to legacy version 2 `float64[32]` metadata. See `docs/format.rst` for exact offsets and compatibility rules. Fixed-width aligned fields prepare for, but do not themselves provide, native acquire/release atomics.
@@ -23,8 +23,10 @@ New streams use metadata version 3: a fixed 256-byte, little-endian structured h
 ### Locking model
 - Cross-process: `portalocker` file locks in `/tmp/pyshmem-locks-<uid>/` (or `$PYSHMEM_LOCK_DIR`)
 - Per-thread: `threading.RLock` (re-entrant within a thread)
-- The `_lock_state(name)` function returns/creates a `_SharedLockState` that is shared across all `SharedMemory` handles opened for the same name in the same process.
+- The `_lock_state(name)` function returns/creates a reference-counted `_SharedLockState` shared across all `SharedMemory` handles opened for the same name in the same process; the last handle evicts the entry and closes the file descriptor.
 - Crash recovery: `portalocker` uses OS-level file locks that are released automatically on process exit.
+- Unlink/recreate safety: `_SharedLockState` records the lock file's inode and rebinds a stale handle when the pathname resolves to a new inode, so a destroyed-and-recreated stream reconverges on one lock. Streams also carry a random 128-bit `instance_id`; handle-level `unlink()` rejects a newer replacement with `StaleStreamError`.
+- Fork hardening: an `os.register_at_fork` child handler resets each inherited `_SharedLockState` (fresh RLock, cleared held flag, reopened private fd) and drops cached CUDA IPC tensors.
 
 ### Write sequence protocol
 Writers bracket payloads with odd/even sequence numbers:
@@ -69,6 +71,7 @@ shm = pyshmem.open("my_stream", readonly=True)           # consumer handle: muta
 
 # Discover
 pyshmem.list_streams()    # returns sorted list of user-visible stream names
+pyshmem.gpu_available()   # True iff torch is importable and CUDA is available
 
 # Use
 shm.write(array)          # CPU: numpy array; GPU: numpy or CUDA tensor
@@ -97,14 +100,17 @@ shm2 = pyshmem.SharedMemory.create_from_config(cfg)
 shm.close()               # detach this handle; stream persists
 shm.unlink()              # destroy the stream entirely
 pyshmem.unlink("my_stream")
+pyshmem.unlink_quiet("x") # unlink; no error if the stream is already gone
+pyshmem.purge()           # remove all validated pyshmem segments (see CLI)
 ```
 
 ## Constants
 
 | Name | Description |
 |------|-------------|
-| `GPU_SUPPORTED_DTYPES` | `frozenset` of NumPy dtypes that can be used with `gpu_device=` |
+| `GPU_SUPPORTED_DTYPES` | `frozenset` of NumPy dtypes the installed torch can map (see Supported dtypes) |
 | `InconsistentStreamError` | Raised when a writer failed or exited before publishing a complete payload |
+| `StaleStreamError` | Raised when a handle operates on a stream that was unlinked and recreated (instance-id mismatch) |
 
 ## CLI
 
@@ -120,31 +126,45 @@ pyshmem purge --include-cuda-orphans  # additionally sweep global dead-producer 
 
 - **`create()`** calls `SharedMemory._create()` which creates segments atomically (with cleanup on failure).
 - **`open()`** calls `SharedMemory._open()` which reads metadata to reconstruct shape/dtype without needing the caller to know them.
-- **`open()` reconstructs the stream as created** (`_resolve_open_target_device`): for a GPU stream it auto-attaches to the stored device (`METADATA_INDEX_DEVICE_INDEX`) even when the caller omits `gpu_device`. If the device can't be attached, it falls back to the CPU mirror when one exists (e.g. the producer exited but `cpu_mirror=True`), and otherwise raises a clear error. An explicit `gpu_device=` is validated against the stored device and, if it can't attach, raises rather than falling back. Passing `gpu_device=False` opts out of attaching the producer's CUDA tensor entirely and reads the host mirror as a NumPy array — the way to consume a GPU stream's mirror from a CUDA-capable process (where the default would auto-attach to the GPU). It requires `cpu_mirror=True` and otherwise raises `ValueError`.
+- **`open()` device resolution** (`_resolve_open_target_device`): omitting `gpu_device` auto-attaches to the stored device (`METADATA_INDEX_DEVICE_INDEX`); if that can't attach it falls back to the CPU mirror when one exists, else raises. An explicit `gpu_device=` must match the stored device and raises (no fallback) if it can't attach. `gpu_device=False` skips CUDA entirely and reads the host mirror as NumPy (requires `cpu_mirror=True`, else `ValueError`).
 - **`readonly=True` handles** (`open(..., readonly=True)`): a per-handle guard (`_ensure_writable`) makes every mutating operation raise `PermissionError` — `write`, `write_locked`, `clear`, `acquire`/`locked`, `pinned_buffer`, unsafe (`safe=False`) reads, and handle-level `unlink`. It does not protect the segment: other writable handles to the same stream (and the owner) still publish. `describe()` reports the `readonly` flag.
 - **Resource tracker suppression**: segments are opened through `_attach_segment()`, which passes the public `track=False` on Python 3.13+ (so they are never registered) and otherwise falls back to constructing the segment and calling `_unregister()` (the private `resource_tracker.unregister` reach-in). Either way child process exits don't spuriously warn about leaked shared memory.
 - **Platform**: POSIX only (Linux and macOS). Full Linux support; macOS works but GPU IPC is not tested there. Windows is **not supported** (no POSIX shared-memory persistence / process-shared locks) and is excluded from CI.
 
 ## Supported dtypes
 
-CPU streams: `int8 int16 int32 int64 uint8 uint16 uint32 uint64 float16 float32 float64`
+CPU streams (`DTYPE_TABLE`, stable integer codes in the persistent format):
+`int8 int16 int32 int64 uint8 uint16 uint32 uint64 float16 float32 float64 bool complex64 complex128`.
 
-GPU streams (torch-mapped): `int8 int16 int32 int64 uint8 float16 float32 float64`
-Note: `uint16 uint32 uint64` are **not** supported for GPU (no PyTorch equivalent); `create()` raises `ValueError` at construction time.
+GPU streams: **capability-driven**, not a fixed list. `GPU_SUPPORTED_DTYPES` is
+built at import time by mapping each `DTYPE_TABLE` entry to `getattr(torch, name)`,
+so a dtype is GPU-usable iff the installed torch exposes it (e.g. older torch lacks
+`uint16/uint32/uint64`; newer torch adds them). `create(gpu_device=...)`
+with an unsupported dtype raises `ValueError` at construction time. Never
+hard-code the GPU dtype set — read `GPU_SUPPORTED_DTYPES`.
 
 ## Project Structure
 
 ```
 src/pyshmem/
-  __init__.py     # public surface (create, open, unlink, stream, list_streams, gpu_available, GPU_SUPPORTED_DTYPES)
-  _shared.py      # entire implementation
-  _cli.py         # CLI entry point (pyshmem list / unlink)
+  __init__.py     # public surface: create open unlink unlink_quiet stream purge
+                  #   list_streams gpu_available SharedMemory GPU_SUPPORTED_DTYPES
+                  #   InconsistentStreamError StaleStreamError __version__
+  _shared.py      # entire implementation (~2.7k lines)
+  _cli.py         # CLI entry point (list / unlink / purge)
 tests/
-  conftest.py     # shm_name fixture (auto-cleanup via uuid)
-  test_cpu_api.py # CPU stream tests (pytest.mark.cpu)
-  test_gpu_api.py # GPU stream tests (pytest.mark.gpu, skipif no CUDA)
-  test_benchmark.py
+  conftest.py               # shm_name fixture (auto-cleanup via uuid)
+  test_cpu_api.py           # CPU stream tests (pytest.mark.cpu)
+  test_gpu_api.py           # GPU stream tests (pytest.mark.gpu, skipif no CUDA)
+  test_benchmark.py         # microbenchmark timing tests
+  test_benchmark_harness.py # spawned-process IPC benchmark smoke test
+benchmarks/       # benchmark_ipc.py + checked-in versioned JSON results
+docs/             # Sphinx sources (format.rst is the authoritative on-disk format spec)
 ```
+
+Other tracked docs: `README.md` (adopter landing page), `CHANGELOG.md`,
+`CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `IMPROVEMENTS.md`,
+`adopter-review/` (audit-remediation status).
 
 ## Running Tests
 
