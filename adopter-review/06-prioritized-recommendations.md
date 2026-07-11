@@ -35,7 +35,9 @@ Detailed evidence is in [Implementation status](00-implementation-status.md).
   seqlock protocol, reliance assumptions, and the absence of hardware barriers),
   with correctness claims **narrowed** to validated architectures (x86-64,
   aarch64) and the hot-path counter alignment enforced by a regression test. A
-  native acquire/release atomic backend remains the open enforcement step.
+  Publication ordering is now **enforced** through x86-64 TSO, runtime
+  ``libatomic`` acquire/release operations elsewhere, or a process-shared
+  OS-lock barrier fallback. Tests force the native and fallback paths.
 
 The original prioritized list below is retained so unfinished portions remain
 visible rather than disappearing when an item is partially completed.

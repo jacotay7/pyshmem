@@ -17,9 +17,10 @@ item described below:
 The original sections are retained as the evidence that motivated each change.
 Since then the memory model has been specified (with narrowed platform claims),
 the pickle trust boundary closed with a restricted unpickler, and the private
-`resource_tracker` reach-in avoided on Python 3.13+. A hardware-enforced atomic
-memory model, reliance on torch's private reduction internals, and the CUDA
-lifecycle warning remain open.
+`resource_tracker` reach-in avoided on Python 3.13+. Publication ordering is now
+enforced through x86-64 TSO, runtime `libatomic` acquire/release operations, or
+a portable OS-lock barrier fallback. Reliance on torch's private reduction
+internals and the CUDA lifecycle warning remain open.
 
 ## P0: a failed or crashed write can block readers forever
 

@@ -18,11 +18,14 @@ import asyncio
 import hashlib
 import builtins
 from contextlib import contextmanager
+import ctypes
+import ctypes.util
 import glob
 import inspect
 import io
 import math
 import os
+import platform
 import pickle
 import tempfile
 import threading
@@ -172,6 +175,48 @@ METADATA_V3_DTYPE = np.dtype(
 METADATA_NAME_MAX = 256
 METADATA_TOTAL_BYTES = METADATA_BYTES + METADATA_NAME_MAX
 
+_ATOMIC_RELAXED = 0
+_ATOMIC_ACQUIRE = 2
+_ATOMIC_RELEASE = 3
+_ATOMIC_SEQ_CST = 5
+_DIRECT_ATOMIC_ARCH = platform.machine().lower() in {"x86_64", "amd64"}
+
+
+class _LibAtomic:
+    """Minimal 64-bit acquire/release wrapper around GCC's libatomic."""
+
+    def __init__(self, library) -> None:
+        self._load = getattr(library, "__atomic_load_8")
+        self._load.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self._load.restype = ctypes.c_uint64
+        self._store = getattr(library, "__atomic_store_8")
+        self._store.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_int]
+        self._store.restype = None
+
+    def load(self, address: int, *, signed: bool) -> int:
+        value = self._load(address, _ATOMIC_ACQUIRE)
+        return ctypes.c_int64(value).value if signed else int(value)
+
+    def store(self, address: int, value: int, *, order: int) -> None:
+        self._store(
+            address,
+            ctypes.c_uint64(value).value,
+            order,
+        )
+
+
+def _load_native_atomics() -> _LibAtomic | None:
+    library_name = ctypes.util.find_library("atomic")
+    if not library_name:
+        return None
+    try:
+        return _LibAtomic(ctypes.CDLL(library_name))
+    except (AttributeError, OSError):
+        return None
+
+
+_NATIVE_ATOMICS = _load_native_atomics()
+
 _THREAD_LOCK_GUARD = threading.Lock()
 _THREAD_LOCKS: dict[str, "_SharedLockState"] = {}
 _LOCAL_GPU_TENSORS: dict[str, weakref.ReferenceType[Any]] = {}
@@ -268,6 +313,59 @@ class _MetadataView:
 
     def _flags(self) -> int:
         return int(self._v3["flags"])
+
+    @property
+    def native_atomics(self) -> bool:
+        return self._v3 is not None and (
+            _DIRECT_ATOMIC_ARCH or _NATIVE_ATOMICS is not None
+        )
+
+    def _atomic_address(self, field: str) -> int:
+        offset = METADATA_V3_DTYPE.fields[field][1]
+        return ctypes.addressof(ctypes.c_char.from_buffer(self._v3, offset))
+
+    def load_publication_state_acquire(self) -> tuple[int, int] | None:
+        if not self.native_atomics:
+            return None
+        if _DIRECT_ATOMIC_ARCH:
+            return (
+                int(self._v3["write_sequence"]),
+                int(self._v3["count"]),
+            )
+        sequence = _NATIVE_ATOMICS.load(
+            self._atomic_address("write_sequence"), signed=True
+        )
+        # The acquired final sequence publication makes the preceding ordinary
+        # count and payload stores visible.
+        count = int(self._v3["count"])
+        return sequence, count
+
+    def load_sequence_acquire(self) -> int:
+        state = self.load_publication_state_acquire()
+        if state is None:
+            return int(self[METADATA_INDEX_WRITE_SEQUENCE])
+        return state[0]
+
+    def load_count_acquire(self) -> int:
+        return int(self[METADATA_INDEX_COUNT])
+
+    def store_sequence_release(
+        self, value: int, *, write_started: bool = False
+    ) -> None:
+        if self._v3 is not None and _DIRECT_ATOMIC_ARCH:
+            self._v3["write_sequence"] = value
+            return
+        if self._v3 is not None and _NATIVE_ATOMICS is not None:
+            _NATIVE_ATOMICS.store(
+                self._atomic_address("write_sequence"),
+                value,
+                order=_ATOMIC_SEQ_CST if write_started else _ATOMIC_RELEASE,
+            )
+            return
+        self[METADATA_INDEX_WRITE_SEQUENCE] = value
+
+    def store_count_release(self, value: int) -> None:
+        self[METADATA_INDEX_COUNT] = value
 
     def __getitem__(self, index: int):
         if self._v2 is not None:
@@ -1203,7 +1301,7 @@ class SharedMemory:
     def count(self) -> int:
         """Return the number of completed writes recorded on the stream."""
         self._ensure_open("read count from")
-        return int(self._metadata[METADATA_INDEX_COUNT])
+        return self._metadata.load_count_acquire()
 
     @property
     def write_time(self) -> float:
@@ -1215,7 +1313,7 @@ class SharedMemory:
     def write_sequence(self) -> int:
         """Return the internal write sequence counter for the stream."""
         self._ensure_open("read write_sequence from")
-        return int(self._metadata[METADATA_INDEX_WRITE_SEQUENCE])
+        return self._metadata.load_sequence_acquire()
 
     def _ensure_open(self, operation: str) -> None:
         if self._closed:
@@ -1227,6 +1325,61 @@ class SharedMemory:
     def _lock_owned_by_current_thread(self) -> bool:
         return self._lock_state.owner_thread_id == threading.get_ident()
 
+    def _sample_publication_state(
+        self, *, timeout: float | None, poll_interval: float
+    ) -> tuple[int, int]:
+        """Load sequence/count behind an OS-lock acquire/release barrier.
+
+        Writers hold the same process-shared file lock from the odd sequence
+        publication through the payload copy and final even publication. A
+        reader briefly acquiring that lock before each sequence sample creates
+        an OS synchronization edge without holding the lock during the payload
+        copy itself. The second sample detects a writer that raced with the
+        copy, preserving seqlock retry behavior.
+        """
+        atomic_state = self._metadata.load_publication_state_acquire()
+        if atomic_state is not None:
+            return atomic_state
+        if self._lock_owned_by_current_thread():
+            return (
+                int(self._metadata[METADATA_INDEX_WRITE_SEQUENCE]),
+                int(self._metadata[METADATA_INDEX_COUNT]),
+            )
+
+        deadline = (
+            None if timeout is None else time.monotonic() + float(timeout)
+        )
+        if deadline is None:
+            acquired_thread_lock = self._lock_state.thread_lock.acquire()
+        else:
+            acquired_thread_lock = self._lock_state.thread_lock.acquire(
+                timeout=max(0.0, deadline - time.monotonic())
+            )
+        if not acquired_thread_lock:
+            raise TimeoutError("timed out waiting for publication barrier")
+
+        file_locked = False
+        try:
+            self._lock_state.refresh_if_stale()
+            _acquire_file_lock(
+                self._lock_state.file_handle,
+                timeout=(
+                    None
+                    if deadline is None
+                    else max(0.0, deadline - time.monotonic())
+                ),
+                poll_interval=poll_interval,
+            )
+            file_locked = True
+            return (
+                int(self._metadata[METADATA_INDEX_WRITE_SEQUENCE]),
+                int(self._metadata[METADATA_INDEX_COUNT]),
+            )
+        finally:
+            if file_locked:
+                _release_file_lock(self._lock_state.file_handle)
+            self._lock_state.thread_lock.release()
+
     def _invalidate_abandoned_write(self, observed_sequence: int) -> bool:
         """Mark an odd generation invalid after its writer process died."""
         owner_pid = int(self._metadata[METADATA_INDEX_LOCK_OWNER_PID])
@@ -1237,9 +1390,9 @@ class SharedMemory:
         except TimeoutError:
             return False
         try:
-            current = self.write_sequence
+            current = self._metadata.load_sequence_acquire()
             if current == observed_sequence and current > 0 and current % 2:
-                self._metadata[METADATA_INDEX_WRITE_SEQUENCE] = -current
+                self._metadata.store_sequence_release(-current)
                 return True
             return current < 0
         finally:
@@ -1252,7 +1405,14 @@ class SharedMemory:
             None if timeout is None else time.monotonic() + float(timeout)
         )
         while True:
-            sequence = self.write_sequence
+            remaining = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            sequence, _ = self._sample_publication_state(
+                timeout=remaining, poll_interval=poll_interval
+            )
             if sequence < 0:
                 raise InconsistentStreamError(
                     f"stream {self.name!r} contains an incomplete write; "
@@ -1273,27 +1433,30 @@ class SharedMemory:
             time.sleep(poll_interval)
 
     def _finish_write(self) -> None:
-        self._metadata[METADATA_INDEX_COUNT] += 1
+        count = int(self._metadata[METADATA_INDEX_COUNT]) + 1
+        sequence = self._metadata.load_sequence_acquire() + 1
         self._metadata[METADATA_INDEX_WRITE_TIME] = time.time()
-        self._metadata[METADATA_INDEX_WRITE_SEQUENCE] += 1
+        self._metadata.store_count_release(count)
+        self._metadata.store_sequence_release(sequence)
 
     def _mark_write_started(self) -> None:
-        sequence = int(self._metadata[METADATA_INDEX_WRITE_SEQUENCE])
+        sequence = self._metadata.load_sequence_acquire()
         if sequence < 0:
             # A previous copy failed or its writer died.  The new write fully
             # replaces the payload, so start a fresh odd generation beyond it.
             sequence = abs(sequence)
-            self._metadata[METADATA_INDEX_WRITE_SEQUENCE] = (
-                sequence + 2 if sequence % 2 else sequence + 1
+            self._metadata.store_sequence_release(
+                sequence + 2 if sequence % 2 else sequence + 1,
+                write_started=True,
             )
             return
-        self._metadata[METADATA_INDEX_WRITE_SEQUENCE] = sequence + 1
+        self._metadata.store_sequence_release(sequence + 1, write_started=True)
 
     def _abort_write(self) -> None:
         """Publish an invalid generation without claiming partial data."""
-        sequence = int(self._metadata[METADATA_INDEX_WRITE_SEQUENCE])
+        sequence = self._metadata.load_sequence_acquire()
         if sequence >= 0:
-            self._metadata[METADATA_INDEX_WRITE_SEQUENCE] = -max(sequence, 1)
+            self._metadata.store_sequence_release(-max(sequence, 1))
 
     def _lock_metadata_on_acquire(self) -> None:
         self._metadata[METADATA_INDEX_LOCK_OWNER_PID] = os.getpid()
@@ -1326,9 +1489,16 @@ class SharedMemory:
                 result = out
             else:
                 result = np.copy(self._array)
-            end_sequence = self.write_sequence
+            remaining = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            end_sequence, end_count = self._sample_publication_state(
+                timeout=remaining, poll_interval=poll_interval
+            )
             if start_sequence == end_sequence:
-                self._last_seen_count = self.count
+                self._last_seen_count = end_count
                 return result
 
     def _read_consistent_gpu(
@@ -1348,9 +1518,16 @@ class SharedMemory:
                     poll_interval, timeout=remaining
                 )
                 cpu_snapshot = np.copy(self._array)
-                end_sequence = self.write_sequence
+                remaining = (
+                    None
+                    if deadline is None
+                    else max(0.0, deadline - time.monotonic())
+                )
+                end_sequence, end_count = self._sample_publication_state(
+                    timeout=remaining, poll_interval=poll_interval
+                )
                 if start_sequence == end_sequence:
-                    self._last_seen_count = self.count
+                    self._last_seen_count = end_count
                     result = torch.as_tensor(
                         cpu_snapshot,
                         dtype=self._torch_dtype,
@@ -1370,9 +1547,16 @@ class SharedMemory:
             )
             result = self._gpu_tensor.clone()
             torch.cuda.synchronize(device=self.gpu_device)
-            end_sequence = self.write_sequence
+            remaining = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            end_sequence, end_count = self._sample_publication_state(
+                timeout=remaining, poll_interval=poll_interval
+            )
             if start_sequence == end_sequence:
-                self._last_seen_count = self.count
+                self._last_seen_count = end_count
                 return result
 
     def acquire(
@@ -1906,6 +2090,24 @@ class SharedMemory:
         while True:
             # Skip polling count while a write is in progress (odd sequence).
             sequence = self.write_sequence
+            count = self.count
+            if sequence >= 0 and sequence % 2 == 0 and count == baseline:
+                if timeout is not None and (time.monotonic() - start) >= float(
+                    timeout
+                ):
+                    raise TimeoutError(
+                        f"timed out waiting for a new write on {self.name!r}"
+                    )
+                time.sleep(poll_interval)
+                continue
+            remaining = (
+                None
+                if timeout is None
+                else max(0.0, float(timeout) - (time.monotonic() - start))
+            )
+            sequence, count = self._sample_publication_state(
+                timeout=remaining, poll_interval=poll_interval
+            )
             if sequence < 0:
                 raise InconsistentStreamError(
                     f"stream {self.name!r} contains an incomplete write; "
@@ -1919,7 +2121,7 @@ class SharedMemory:
                     "a write; a successful write is required before it can "
                     "be read"
                 )
-            if sequence % 2 == 0 and self.count != baseline:
+            if sequence % 2 == 0 and count != baseline:
                 break
             if timeout is not None and (time.monotonic() - start) >= float(
                 timeout
@@ -2007,6 +2209,26 @@ class SharedMemory:
         start = time.monotonic()
         while True:
             sequence = self.write_sequence
+            count = self.count
+            if sequence >= 0 and sequence % 2 == 0 and count == baseline:
+                if timeout is not None and (time.monotonic() - start) >= float(
+                    timeout
+                ):
+                    raise TimeoutError(
+                        f"timed out waiting for a new write on {self.name!r}"
+                    )
+                await asyncio.sleep(poll_interval)
+                continue
+            remaining = (
+                None
+                if timeout is None
+                else max(0.0, float(timeout) - (time.monotonic() - start))
+            )
+            sequence, count = await asyncio.to_thread(
+                self._sample_publication_state,
+                timeout=remaining,
+                poll_interval=poll_interval,
+            )
             if sequence < 0:
                 raise InconsistentStreamError(
                     f"stream {self.name!r} contains an incomplete write; "
@@ -2020,7 +2242,7 @@ class SharedMemory:
                     "a write; a successful write is required before it can "
                     "be read"
                 )
-            if sequence % 2 == 0 and self.count != baseline:
+            if sequence % 2 == 0 and count != baseline:
                 break
             if timeout is not None and (time.monotonic() - start) >= float(
                 timeout

@@ -32,6 +32,7 @@ Scope: first remediation batch following the critical adopter review
 | Fault testing: CUDA failure during publication | Done | GPU regression test injects a CUDA error at publication-time synchronize and asserts the write path's `_abort_write` leaves the stream invalid (`InconsistentStreamError` on read) and that a later good write repairs it. Validated on an RTX 5090. |
 | Fork-state hardening | Done | An `os.register_at_fork` child handler resets each inherited `_SharedLockState` (fresh re-entrant lock, cleared held flag, reopened private lock-file descriptor) and drops cached CUDA IPC tensors. A regression test forks while the parent holds the lock and asserts the child neither inherits held state nor shares the parent's lock (its acquire blocks on the parent), verified load-bearing against a no-reset baseline. Documented in `docs/platforms.rst`. |
 | Pickle CUDA trust boundary | Done | GPU handle reconstruction no longer calls raw `pickle.loads` on the writable 0600 segment. `_RestrictedCudaUnpickler` permits only torch's known CUDA rebuild globals and inert dtype values, so a tampered payload raises `UnpicklingError` instead of executing code. Validated on an RTX 5090: a legit reduction still round-trips, a child opening a tampered handle fails with `disallowed global`, and a torch-independent CPU test covers the rejection path. Documented in `docs/format.rst` and CLAUDE.md. |
+| Interprocess publication ordering enforced | Done | Safe reads use x86-64 TSO directly, runtime `libatomic` acquire/release operations elsewhere when available, and a process-shared OS-lock barrier fallback. Regression tests force native and fallback paths; payload copies remain outside the lock with sequence retry semantics. |
 
 ## Verification record
 
@@ -54,10 +55,9 @@ precisely isolating that lifecycle warning remains open.
 
 ### P1 correctness and contract
 
-1. Enforce the specified memory model in hardware. Fixed-width aligned counters
-   and the model itself are now documented and the alignment contract is
-   test-guarded, so the remaining step is a native acquire/release atomic
-   backend (or FFI synchronization layer) for weakly ordered architectures.
+1. Maintain the implemented publication backends as architectures are added.
+   x86-64 TSO, runtime `libatomic`, and the OS-lock fallback now enforce the
+   specified model; no known supported-platform ordering gap remains.
 2. Extend format validation only when new fields/features are introduced. The
    current v3 semantic fields and segment geometry are validated; checksums or
    authenticated metadata remain optional future hardening.

@@ -887,6 +887,51 @@ def test_hot_path_counters_are_8_byte_aligned(field):
     assert offset % 8 == 0, f"{field} offset {offset} must be 8-byte aligned"
 
 
+def test_native_publication_path_avoids_file_barrier(shm_name, monkeypatch):
+    if pyshmem_shared._NATIVE_ATOMICS is None:
+        pytest.skip("libatomic is not available")
+    owner = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
+    reader = pyshmem.open(shm_name)
+    owner.write(np.arange(4, dtype=np.float32))
+    monkeypatch.setattr(pyshmem_shared, "_DIRECT_ATOMIC_ARCH", False)
+
+    def unexpected_file_lock(*args, **kwargs):
+        raise AssertionError("native atomic reads must not take the file lock")
+
+    monkeypatch.setattr(
+        pyshmem_shared, "_acquire_file_lock", unexpected_file_lock
+    )
+    try:
+        np.testing.assert_array_equal(reader.read(), np.arange(4))
+    finally:
+        reader.close()
+        owner.close()
+
+
+def test_publication_file_barrier_fallback(shm_name, monkeypatch):
+    owner = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
+    reader = pyshmem.open(shm_name)
+    owner.write(np.arange(4, dtype=np.float32))
+    monkeypatch.setattr(pyshmem_shared, "_DIRECT_ATOMIC_ARCH", False)
+    monkeypatch.setattr(pyshmem_shared, "_NATIVE_ATOMICS", None)
+    original_acquire = pyshmem_shared._acquire_file_lock
+    calls = []
+
+    def recording_file_lock(*args, **kwargs):
+        calls.append(1)
+        return original_acquire(*args, **kwargs)
+
+    monkeypatch.setattr(
+        pyshmem_shared, "_acquire_file_lock", recording_file_lock
+    )
+    try:
+        np.testing.assert_array_equal(reader.read(), np.arange(4))
+        assert len(calls) >= 2
+    finally:
+        reader.close()
+        owner.close()
+
+
 @pytest.mark.cpu
 @pytest.mark.skipif(
     sys.platform in ("win32", "darwin"),

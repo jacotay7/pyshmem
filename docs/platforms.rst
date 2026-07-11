@@ -17,11 +17,11 @@ GPU IPC (via torch's ``reduce_tensor`` reduction) is supported on Linux.
 CPU architecture
 ----------------
 
-The lock-free read/write consistency protocol assumes single-copy atomicity of
-naturally aligned 64-bit accesses. It is validated under CPython on **x86-64**
-and **aarch64**. Other architectures are best-effort: pyshmem inserts no
-explicit hardware memory barriers, so torn-read freedom is not guaranteed there.
-See :doc:`format` for the full memory model.
+Snapshot consistency uses x86-64 TSO ordering directly, acquire/release
+operations from GCC ``libatomic`` when available, and the process-shared OS file
+lock as a portable sequence-sampling barrier otherwise. The direct and native
+paths are validated on **x86-64** and Linux **aarch64**; other POSIX
+architectures retain correctness through the fallback. See :doc:`format`.
 
 macOS
 -----

@@ -149,34 +149,35 @@ What pyshmem relies on
 - **Single-writer serialization.** Concurrent writers are excluded by the
   cross-process ``portalocker`` file lock, so only one process ever advances the
   sequence at a time.
-- **Indivisible counter access.** Under CPython, a store to a naturally aligned
-  8-byte field compiles to one machine store and is not torn; a reader never
-  observes a half-updated sequence or count.
-- **Program-order publication.** The reader's post-snapshot re-read of the
-  sequence detects any write that overlapped the copy, so a stale or torn
-  payload is retried rather than returned.
+- **Architecture-specific publication barriers.** On x86-64, naturally aligned
+  stores plus TSO ordering provide the required publication order without FFI
+  overhead. Elsewhere pyshmem uses GCC ``libatomic`` acquire/release operations
+  when available. The odd publication is sequentially consistent and the final
+  even publication is a release store sampled with acquire semantics.
+- **Portable fallback.** If neither x86-64 TSO nor ``libatomic`` is available,
+  readers briefly acquire and release the process-shared OS file lock before
+  both sequence samples. Writers hold that lock across payload publication, so
+  the syscalls supply the synchronization edge while the payload copy itself
+  remains outside the reader lock.
+- **Overlap detection.** The post-snapshot sequence sample detects a write that
+  raced with the copy, so the snapshot is retried.
 
 What pyshmem does **not** provide
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-pyshmem does **not** insert explicit hardware memory barriers. NumPy loads and
-stores into the mapped buffer are ordinary aligned accesses, not C11
-acquire/release atomics. On a weakly ordered architecture a reader could in
-principle observe the even sequence before all payload stores that preceded it
-become visible. The seqlock's re-read narrows but does not by construction
-eliminate this window without a barrier. A fully specified acquire/release
-implementation for lock-free readers therefore remains future work; the header
-deliberately aligns the counters so a native atomic backend can be added without
-another layout change.
+The portable fallback is not lock-free at the two sequence-sampling points, and
+``libatomic`` is discovered at runtime rather than required as a binary
+dependency. The payload copy remains outside the lock and keeps seqlock retry
+semantics. Public ``count`` and ``write_sequence`` properties are diagnostic
+snapshots; safe reads use the synchronized publication path.
 
 Validated platforms
 ~~~~~~~~~~~~~~~~~~~~~
 
-The model is validated under CPython on **x86-64** and **aarch64**, which
-provide the single-copy atomicity of aligned 64-bit accesses that the protocol
-assumes. Other architectures are best-effort: the format and protocol are
-portable, but the absence of explicit barriers means torn-read freedom is not
-guaranteed there until the native atomic backend lands.
+The direct TSO path is used only on **x86-64**. The native acquire/release path
+is used wherever ``libatomic`` is available, including validated Linux
+**aarch64**. Other POSIX architectures use the OS-lock fallback rather than
+silently weakening consistency.
 
 Payload and CUDA handle segments
 --------------------------------
