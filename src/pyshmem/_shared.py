@@ -1466,6 +1466,48 @@ class SharedMemory:
         self._ensure_open("read write_sequence from")
         return self._metadata.load_sequence_acquire()
 
+    @property
+    def creator_pid(self) -> int:
+        """Return the PID of the process that created the stream."""
+        self._ensure_open("read creator_pid from")
+        return int(self._metadata[METADATA_INDEX_CREATOR_PID])
+
+    @property
+    def age(self) -> float:
+        """Return seconds elapsed since the most recent completed write.
+
+        Returns ``math.inf`` when the stream has never received a completed
+        write. Lets consumers detect stale data from an idle or dead producer
+        without any producer-side heartbeat thread — every completed write
+        already stamps ``write_time``.
+        """
+        self._ensure_open("read age from")
+        written = float(self._metadata[METADATA_INDEX_WRITE_TIME])
+        if written <= 0.0:
+            return math.inf
+        return max(0.0, time.time() - written)
+
+    def is_stale(self, max_age: float) -> bool:
+        """Return ``True`` if the latest write is older than ``max_age`` s.
+
+        A never-written stream is always stale. ``max_age`` must be positive.
+        """
+        if max_age <= 0:
+            raise ValueError("max_age must be positive")
+        return self.age > float(max_age)
+
+    def producer_alive(self) -> bool:
+        """Return whether the creating process is still running.
+
+        Best-effort, single-host, POSIX liveness based on the recorded creator
+        PID: it cannot observe producers on other hosts and can be fooled by
+        PID reuse. It complements — does not replace — the seqlock/lock-owner
+        machinery that detects a writer dying *mid-write*; use this to notice a
+        producer that exited cleanly between writes.
+        """
+        self._ensure_open("check producer liveness for")
+        return _pid_is_alive(int(self._metadata[METADATA_INDEX_CREATOR_PID]))
+
     def _ensure_open(self, operation: str) -> None:
         if self._closed:
             raise RuntimeError(
@@ -2486,6 +2528,9 @@ class SharedMemory:
             f"write_seq:    {self.write_sequence}",
             f"owner:        {self.owner}",
             f"readonly:     {self.readonly}",
+            f"creator_pid:  {self.creator_pid}",
+            f"producer:     {'alive' if self.producer_alive() else 'dead'}",
+            f"age:          {self.age:.3f} s",
         ]
         return "\n".join(lines)
 

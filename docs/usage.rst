@@ -384,6 +384,40 @@ with all metadata fields:
    write_time:   1748725312.4
    write_seq:    84
    owner:        False
+   readonly:     False
+   creator_pid:  10234
+   producer:     alive
+   age:          0.004 s
+
+Producer liveness and staleness
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Consumers can tell whether data is fresh and whether the producer is still
+running without any producer-side heartbeat thread — every completed write
+already stamps the timestamp the checks read.
+
+.. code-block:: python
+
+   shm.age               # seconds since the last completed write
+                         #   (math.inf if it was never written)
+   shm.is_stale(0.5)     # True if the latest write is older than 0.5 s
+   shm.producer_alive()  # is the creating process still running?
+   shm.creator_pid       # PID that created the stream
+
+A typical watchdog rejects data that is either stale or orphaned:
+
+.. code-block:: python
+
+   frame = shm.read()
+   if shm.is_stale(1.0) or not shm.producer_alive():
+       raise RuntimeError("producer stalled or exited")
+
+``producer_alive()`` is a best-effort, single-host POSIX check against the
+recorded creator PID: it cannot see producers on other hosts and can be fooled
+by PID reuse.  It complements — it does not replace — the seqlock machinery
+that detects a writer dying *mid-write* (which surfaces as
+:class:`~pyshmem.InconsistentStreamError`); use ``producer_alive()`` to notice a
+producer that exited cleanly *between* writes.
 
 Config export and import
 ~~~~~~~~~~~~~~~~~~~~~~~~

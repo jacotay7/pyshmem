@@ -96,6 +96,12 @@ shm.describe()             # human-readable summary string
 cfg = shm.to_config()      # dict: name/shape/dtype/gpu_device/cpu_mirror
 shm2 = pyshmem.SharedMemory.create_from_config(cfg)
 
+# Liveness / staleness (consumer-side, no heartbeat thread)
+shm.age                    # seconds since last completed write (inf if never)
+shm.is_stale(max_age)      # True if latest write older than max_age seconds
+shm.producer_alive()       # best-effort single-host PID liveness of creator
+shm.creator_pid            # PID that created the stream
+
 # Lifecycle
 shm.close()               # detach this handle; stream persists
 shm.unlink()              # destroy the stream entirely

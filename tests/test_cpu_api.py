@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from importlib.metadata import version
+import math
 import multiprocessing as mp
 import os
 from pathlib import Path
@@ -951,6 +952,50 @@ def test_discovery_ignores_corrupt_header_crc(shm_name):
         assert shm_name not in pyshmem.list_streams()
     finally:
         owner.close()
+
+
+def test_age_reports_inf_before_write_and_small_after(shm_name):
+    shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    try:
+        assert shm.age == math.inf
+        assert shm.is_stale(0.5) is True
+        shm.write(np.zeros(2, dtype=np.float32))
+        assert 0.0 <= shm.age < 5.0
+        assert shm.is_stale(60.0) is False
+        with pytest.raises(ValueError, match="max_age must be positive"):
+            shm.is_stale(0)
+    finally:
+        shm.unlink()
+
+
+def test_producer_alive_true_for_own_stream(shm_name):
+    shm = pyshmem.create(shm_name, shape=(1,), dtype=np.float32)
+    try:
+        assert shm.creator_pid == os.getpid()
+        assert shm.producer_alive() is True
+        assert f"creator_pid:  {os.getpid()}" in shm.describe()
+        assert "producer:     alive" in shm.describe()
+    finally:
+        shm.unlink()
+
+
+def test_producer_alive_false_after_creator_exits(shm_name):
+    result = _run_python_child(
+        "import numpy as np, pyshmem\n"
+        f"shm = pyshmem.create({shm_name!r}, shape=(1,), dtype=np.float32)\n"
+        "shm.write(np.ones(1, dtype=np.float32))\n"
+        "shm.close()\n"
+    )
+    assert result.returncode == 0, result.stderr
+    reader = pyshmem.open(shm_name)
+    try:
+        assert reader.creator_pid > 0
+        assert reader.creator_pid != os.getpid()
+        assert reader.producer_alive() is False
+        # Data is still readable even though the producer has exited.
+        np.testing.assert_array_equal(reader.read(), np.ones(1))
+    finally:
+        reader.unlink()
 
 
 def test_open_rejects_data_segment_size_mismatch(shm_name):

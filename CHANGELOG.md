@@ -37,6 +37,9 @@ All notable user-facing changes are documented here. The project follows
   the immutable header fields and name region, validated on open, discovery, and
   purge to reject silent corruption or torn header writes. Backward-compatible:
   version 2 and pre-flag version 3 streams skip the check.
+- Added producer-liveness and staleness helpers: `SharedMemory.age`,
+  `is_stale(max_age)`, `producer_alive()`, and `creator_pid`, plus new
+  `describe()` lines. No producer-side heartbeat thread is required.
 
 ## 1.0.5
 
