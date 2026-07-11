@@ -23,6 +23,8 @@ All notable user-facing changes are documented here. The project follows
   writes by copying directly into shared GPU storage.
 - Added reusable `SharedMemory.pinned_buffer()` host staging for faster repeated
   host-to-GPU writes.
+- Replaced whole-device CUDA synchronization with active-stream event waits for
+  synchronous GPU reads, writes, and clears.
 
 ## 1.0.5
 

@@ -1016,6 +1016,14 @@ def _gpu_write_source(value: Any, torch_dtype):
     return torch.as_tensor(value, dtype=torch_dtype)
 
 
+def _synchronize_cuda_operation(device) -> None:
+    """Wait for prior work in the active stream, not the entire device."""
+    stream = torch.cuda.current_stream(device=device)
+    event = torch.cuda.Event()
+    event.record(stream)
+    event.synchronize()
+
+
 def _resolve_open_target_device(
     name: str,
     device_index: int,
@@ -1627,7 +1635,7 @@ class SharedMemory:
                         dtype=self._torch_dtype,
                         device=self.gpu_device,
                     )
-                    torch.cuda.synchronize(device=self.gpu_device)
+                    _synchronize_cuda_operation(self.gpu_device)
                     return result
 
         while True:
@@ -1640,7 +1648,7 @@ class SharedMemory:
                 poll_interval, timeout=remaining
             )
             result = self._gpu_tensor.clone()
-            torch.cuda.synchronize(device=self.gpu_device)
+            _synchronize_cuda_operation(self.gpu_device)
             remaining = (
                 None
                 if deadline is None
@@ -2056,7 +2064,7 @@ class SharedMemory:
                 if self.cpu_mirror:
                     self._array.fill(0)
                 if self._gpu_tensor is not None:
-                    torch.cuda.synchronize(device=self.gpu_device)
+                    _synchronize_cuda_operation(self.gpu_device)
             except BaseException:
                 self._abort_write()
                 raise
@@ -2124,7 +2132,7 @@ class SharedMemory:
                     self._gpu_tensor.copy_(tensor)
                     if self.cpu_mirror:
                         np.copyto(self._array, tensor.detach().cpu().numpy())
-                    torch.cuda.synchronize(device=self.gpu_device)
+                    _synchronize_cuda_operation(self.gpu_device)
                 else:
                     np.copyto(self._array, array)
             except BaseException:
@@ -2282,7 +2290,7 @@ class SharedMemory:
                 self._gpu_tensor.copy_(tensor)
                 if self.cpu_mirror:
                     np.copyto(self._array, tensor.detach().cpu().numpy())
-                torch.cuda.synchronize(device=self.gpu_device)
+                _synchronize_cuda_operation(self.gpu_device)
             except BaseException:
                 self._abort_write()
                 raise

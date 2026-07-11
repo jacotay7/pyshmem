@@ -46,6 +46,7 @@ surface is Linux and macOS; CUDA support is Linux-only.
 | README as adopter landing page | Done | Replaced the 462-line duplicated manual with a concise overview, CPU/GPU quick start, installation, reproducible performance summary, and license/contact sections. Each section links to the authoritative detailed docs. |
 | Direct host-to-shared-GPU writes | Done | NumPy/CPU values remain host tensors until `shared_cuda_tensor.copy_`, eliminating the temporary GPU allocation and extra D2D copy. A regression test checks zero-copy NumPy wrapping on CPU; a 4 MB local probe improved from the audited 186.25 us to median 171.70 us. |
 | Reusable pinned GPU staging | Done | `SharedMemory.pinned_buffer()` lazily allocates and reuses a correctly shaped/dtyped page-locked CPU tensor, writable through a zero-copy NumPy view. Regression coverage verifies reuse and round-trip correctness; repeated 4 MB writes measured median 149.67 us versus 171.70 us pageable. |
+| Stream-local CUDA synchronization | Done | GPU read/write/clear records and synchronizes an event on the active CUDA stream instead of calling whole-device `torch.cuda.synchronize`. Publication remains synchronous and safe. A regression test forbids the global API while round-trip and clear operations succeed. Fully async cross-process publication remains open. |
 
 ## Verification record
 
@@ -95,8 +96,9 @@ precisely isolating that lifecycle warning remains open.
 
 ### P2 performance and ecosystem
 
-1. Add CUDA stream/event-aware asynchronous operations and avoid whole-device
-   synchronization.
+1. Design fully asynchronous cross-process publication using IPC-capable CUDA
+   events. Synchronous operations now wait only on their active stream and no
+   longer synchronize the whole device.
 2. Replace polling with waitable notifications plus an optional adaptive spin
    policy.
 3. Add DLPack/array-interface adapters, capability-driven dtype support,

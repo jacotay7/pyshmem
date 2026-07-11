@@ -52,14 +52,17 @@ where to optimize.
 
 ### 1. Every GPU operation globally synchronizes the device
 
-GPU writes, reads, clears, and mirrored transfers call
-`torch.cuda.synchronize(device=...)`. This serializes unrelated work on that
-device and prevents overlap with pipeline compute. The raw batched-sync result
-shows how much small operations can benefit from deferred synchronization.
+GPU writes, reads, clears, and mirrored transfers originally called
+`torch.cuda.synchronize(device=...)`, serializing unrelated work on the device.
+**Resolved for synchronous operations:** pyshmem now records and waits on an
+event in the active CUDA stream, and regression coverage forbids the global
+synchronize API. Publication remains synchronous so another process cannot
+observe an incomplete payload.
 
-Offer an asynchronous API that accepts/returns a CUDA event and optionally a
-`torch.cuda.Stream`. A synchronous convenience API can remain, but it should
-wait only on the operation/event involved, not all work on the device.
+The remaining step is an asynchronous API with an IPC-capable event/publication
+protocol. Returning an ordinary local event is insufficient because another
+process also needs to know when the payload behind a published generation is
+safe to consume.
 
 ### 2. NumPy-to-GPU writes take an avoidable path
 

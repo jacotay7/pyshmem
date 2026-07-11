@@ -221,15 +221,19 @@ def test_cuda_failure_during_publication_is_recoverable(shm_name, monkeypatch):
     # A CUDA error surfacing during publication (here at synchronize, after
     # the device copy is enqueued) must leave the stream in the invalid state,
     # not a half-published one, and a later good write must repair it.
-    real_sync = pyshmem_shared.torch.cuda.synchronize
+    real_sync = pyshmem_shared._synchronize_cuda_operation
 
     def failing_sync(*args, **kwargs):
         raise RuntimeError("injected cuda failure")
 
-    monkeypatch.setattr(pyshmem_shared.torch.cuda, "synchronize", failing_sync)
+    monkeypatch.setattr(
+        pyshmem_shared, "_synchronize_cuda_operation", failing_sync
+    )
     with pytest.raises(RuntimeError, match="injected cuda failure"):
         shm.write(torch.ones(4, device="cuda:0"))
-    monkeypatch.setattr(pyshmem_shared.torch.cuda, "synchronize", real_sync)
+    monkeypatch.setattr(
+        pyshmem_shared, "_synchronize_cuda_operation", real_sync
+    )
 
     assert shm.write_sequence < 0
     with pytest.raises(pyshmem.InconsistentStreamError):
@@ -241,6 +245,26 @@ def test_cuda_failure_during_publication_is_recoverable(shm_name, monkeypatch):
     assert torch.equal(shm.read().cpu(), replacement.cpu())
 
     shm.close()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_operations_do_not_synchronize_whole_device(shm_name, monkeypatch):
+    shm = pyshmem.create(
+        shm_name, shape=(4,), dtype=np.float32, gpu_device="cuda:0"
+    )
+
+    def forbidden_device_sync(*args, **kwargs):
+        raise AssertionError("whole-device synchronization is forbidden")
+
+    monkeypatch.setattr(torch.cuda, "synchronize", forbidden_device_sync)
+    try:
+        shm.write(torch.arange(4, device="cuda:0", dtype=torch.float32))
+        torch.testing.assert_close(
+            shm.read(), torch.arange(4, device="cuda:0", dtype=torch.float32)
+        )
+        shm.clear()
+    finally:
+        shm.unlink()
     pyshmem.unlink(shm_name)
 
 

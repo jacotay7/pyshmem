@@ -104,6 +104,17 @@ writes from this buffer measured a 149.67 us median versus 171.70 us from a
 pageable NumPy array. Measure on the intended hardware; pinning too much host
 memory can reduce overall system performance.
 
+CUDA synchronization
+^^^^^^^^^^^^^^^^^^^^
+
+Synchronous reads, writes, and clears record and wait for a CUDA event on the
+active stream. They do not call whole-device ``torch.cuda.synchronize()``, so
+unrelated work in other streams is not drained. The public operation still
+returns only after its own copy is complete and the host publication counter is
+safe for another process to observe. A future fully asynchronous API requires
+an interprocess event/publication protocol; simply returning before updating
+metadata would expose incomplete payloads.
+
 Compatibility mode
 ^^^^^^^^^^^^^^^^^^
 
