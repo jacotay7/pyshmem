@@ -14,6 +14,7 @@ All notable user-facing changes are documented here. The project follows
 - Added maintenance, support, security, and compatibility policies.
 - Made `pyproject.toml` package metadata the single version source used by the
   runtime package and documentation.
+- Added Dependabot, CodeQL, and runtime dependency-vulnerability auditing.
 
 ## 1.0.5
 

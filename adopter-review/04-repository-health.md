@@ -14,8 +14,7 @@ Completed repository-health items from the first batch:
 - a spawned-process IPC benchmark has a CI smoke test and a versioned JSON
   result.
 
-Still open: real GPU CI, dependency/security automation, type checking,
-hosted-doc deployment, release gating, and
+Still open: real GPU CI, type checking, hosted-doc deployment, release gating, and
 architectural/private-API work. Contributor, security, support/compatibility,
 and changelog policies have now been added.
 
@@ -89,8 +88,9 @@ ordinary in-process classes.
 3. **No sanitizer/stress/fault-injection job.** There is no repeated concurrent
    reader/writer stress, kill-during-write recovery test, descriptor-leak test,
    fork test, or metadata-corruption fuzzing.
-4. **No dependency/security automation.** No Dependabot/Renovate, dependency
-   audit, CodeQL, or secret scanning configuration is present.
+4. **Resolved in-repository:** Dependabot covers pip and Actions, CI runs a
+   strict runtime `pip-audit`, and CodeQL runs on changes and weekly. GitHub
+   secret scanning remains a repository-host setting.
 5. **No type checking.** The package has partial annotations but no mypy/pyright
    gate and no `py.typed` marker for consumers.
 6. **Benchmarks never gate regressions.** Hosted smoke tests explicitly disable

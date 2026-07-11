@@ -38,6 +38,7 @@ Scope: first remediation batch following the critical adopter review
 | Spawned-process benchmark harness | Done | `benchmarks/benchmark_ipc.py` calibrates repeated spawn-based request/ack IPC runs and reports throughput plus p50/p95/p99 latency in versioned JSON. It includes an explicitly unsafe raw `multiprocessing.shared_memory` lower-bound baseline, a CI smoke test, and checked-in RTX 5090/Linux results. |
 | Maintainer and adopter policies | Done | Added contributor workflow, security disclosure instructions, support/platform/API compatibility policy, and a repository changelog; README links all four. CODE_OF_CONDUCT and succession policy are deferred until the project has multiple participants. |
 | Single-source versioning | Done | `pyproject.toml` is the only literal version. The public `__version__` and Sphinx release value use `importlib.metadata`; a test prevents installed metadata/runtime drift. |
+| Dependency/security automation | Done | Dependabot tracks Python and GitHub Actions updates; CI runs strict `pip-audit` against installed runtime dependencies; CodeQL runs on pushes, pull requests, and weekly. Repository-host settings such as secret scanning remain external. |
 
 ## Verification record
 
