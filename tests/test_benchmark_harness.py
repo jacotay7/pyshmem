@@ -28,6 +28,9 @@ def test_spawned_process_benchmark_smoke():
             "0.005",
             "--repeats",
             "1",
+            # Keep the CPU smoke fast and deterministic across CUDA / non-CUDA
+            # hosts; the GPU baseline has its own gpu-marked test.
+            "--no-gpu",
         ],
         check=True,
         capture_output=True,

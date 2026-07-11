@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import multiprocessing as mp
 import os
 from pathlib import Path
@@ -1284,3 +1285,35 @@ def test_gpu_read_rejects_cpu_out_buffer(shm_name):
     with pytest.raises(ValueError, match="safe CPU reads"):
         shm.read(out=np.empty(4, dtype=np.float32))
     shm.close()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_spawned_process_gpu_benchmark_smoke():
+    # Exercises the spawned-process GPU IPC baseline end to end: a producer
+    # publishes a CUDA tensor and a separate process maps it over torch IPC and
+    # acks, so this validates both the harness and the cross-process GPU path.
+    script = Path(__file__).parents[1] / "benchmarks" / "benchmark_ipc.py"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--payload-bytes",
+            "256",
+            "--minimum-seconds",
+            "0.005",
+            "--repeats",
+            "1",
+            "--gpu",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    result = json.loads(completed.stdout)
+    assert "pyshmem_gpu" in result["results"]
+    gpu = result["results"]["pyshmem_gpu"]
+    assert gpu["samples"] >= 100
+    assert gpu["latency_us"]["p99"] > 0
+    assert "torch" in result["environment"]
+    assert "cuda_device" in result["environment"]

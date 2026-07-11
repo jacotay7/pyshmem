@@ -79,21 +79,24 @@ The repository includes both single-process microbenchmarks and a calibrated,
 spawned-process request/acknowledgement benchmark with an unsafe raw shared
 memory lower-bound comparison.
 
-On the primary Linux development machine (Python 3.12, NumPy 2.2.6, RTX 5090),
-the spawned-process 64 KiB benchmark measured:
+On the primary Linux development machine (Python 3.12, NumPy 2.2.6, PyTorch
+2.10, RTX 5090), the spawned-process 64 KiB benchmark measured:
 
 | Implementation | Round trips/s | p50 | p95 | p99 |
 |---|---:|---:|---:|---:|
-| pyshmem | 11,683 | 77.69 µs | 139.38 µs | 140.03 µs |
-| Raw shared memory polling | 18,096 | 52.67 µs | 62.86 µs | 107.37 µs |
+| pyshmem (CPU) | 13,940 | 60.45 µs | 112.86 µs | 115.94 µs |
+| pyshmem (GPU IPC) | 4,900 | 189.89 µs | 232.83 µs | 241.00 µs |
+| Raw shared memory polling | 16,952 | 53.58 µs | 104.10 µs | 108.54 µs |
 
 The raw baseline omits pyshmem's locking, metadata validation, discovery, and
-consistent snapshots. Results are machine-specific; run the harness on the
-target deployment host:
+consistent snapshots. The GPU row is a separate spawned process mapping the
+producer's CUDA tensor over torch IPC and reading a consistent device snapshot
+each round trip. Results are machine-specific; run the harness on the target
+deployment host (add `--gpu` for the CUDA baseline):
 
 ```bash
 python benchmarks/benchmark_ipc.py \
-  --payload-bytes 65536 --minimum-seconds 1 --repeats 5
+  --payload-bytes 65536 --minimum-seconds 1 --repeats 5 --gpu
 ```
 
 See the [benchmark documentation](https://pyshmem.readthedocs.io/en/latest/benchmarks.html),

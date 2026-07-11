@@ -110,8 +110,11 @@ visible rather than disappearing when an item is partially completed.
 - Include `tests/conftest.py` in the sdist or omit tests entirely from it.
 - Derive package/docs version from one source.
 - Stop ignoring the improvement plan if it is intended as project guidance.
-- Decide whether `shmpipeline`'s private coupling is supported; test and version
-  that contract if it is.
+- `shmpipeline`'s private coupling is supported and documented (CLAUDE.md); a
+  regression test now pins the surface (`_data_name`/`_metadata_name`/
+  `_gpu_handle_name`/`_lock_path`, `_LOCAL_GPU_TENSORS`, `_array`,
+  `_mark_write_started`/`_finish_write`) so a rename fails in CI instead of
+  silently breaking shmpipeline.
 
 ## Suggested release framing
 

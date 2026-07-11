@@ -48,6 +48,9 @@ All notable user-facing changes are documented here. The project follows
   wake parked `read_new`/`read_new_async` consumers via a Linux futex instead of
   busy-polling (with a polling fallback off Linux/big-endian). Exposed via the
   `SharedMemory.notify` property; default streams are unaffected.
+- Added a spawned-process GPU IPC baseline to the benchmark harness (`--gpu` /
+  `--no-gpu`, auto-detected), reporting `pyshmem_gpu` round-trip latency
+  alongside the CPU and raw baselines.
 
 ## 1.0.5
 

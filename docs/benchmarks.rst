@@ -16,18 +16,47 @@ p50/p95/p99 round-trip latency. A raw
 lower-bound copy/poll baseline; unlike pyshmem, it deliberately provides no
 locking, consistency snapshots, discovery, or metadata validation.
 
+Pass ``--gpu`` to additionally measure a spawned-process GPU baseline
+(``pyshmem_gpu``): a separate process maps the producer's CUDA tensor over
+torch's IPC handle and reads a consistent device snapshot each round trip. It is
+auto-included when CUDA is available and can be forced off with ``--no-gpu``.
+
 .. code-block:: bash
 
    python benchmarks/benchmark_ipc.py \
-       --payload-bytes 65536 --minimum-seconds 1 --repeats 5 \
+       --payload-bytes 65536 --minimum-seconds 1 --repeats 5 --gpu \
        --output benchmarks/results/my-machine.json
 
 The checked-in ``benchmarks/results/rtx5090-linux-2026-07-10.json`` records a
-64 KiB run on the primary Linux development machine. It measured pyshmem at
-11,683 round trips/s (p50 77.69 us, p95 139.38 us, p99 140.03 us), versus the
-unsafe raw baseline at 18,096 round trips/s (p50 52.67 us, p95 62.86 us, p99
-107.37 us). These are one-machine observations, not universal performance
-claims; rerun the harness on the intended deployment host.
+64 KiB run on the primary Linux development machine (Python 3.12, NumPy 2.2.6,
+PyTorch 2.10, RTX 5090):
+
+.. list-table::
+   :header-rows: 1
+
+   * - Implementation
+     - Round trips/s
+     - p50
+     - p95
+     - p99
+   * - pyshmem (CPU)
+     - 13,940
+     - 60.45 us
+     - 112.86 us
+     - 115.94 us
+   * - pyshmem (GPU IPC)
+     - 4,900
+     - 189.89 us
+     - 232.83 us
+     - 241.00 us
+   * - Raw shared memory polling
+     - 16,952
+     - 53.58 us
+     - 104.10 us
+     - 108.54 us
+
+These are one-machine observations, not universal performance claims; rerun the
+harness on the intended deployment host.
 
 Running benchmarks locally
 --------------------------

@@ -96,8 +96,11 @@ precisely isolating that lifecycle warning remains open.
 
 ### P1 product and validation
 
-1. Add a spawned-process PyTorch/CUDA IPC baseline to the now-reproducible CPU
-   harness when CUDA event-aware behavior is implemented.
+1. A spawned-process PyTorch/CUDA IPC baseline is now in the harness
+   (`pyshmem_gpu`, `--gpu`): a separate process maps the producer's CUDA tensor
+   over torch IPC and reads a consistent device snapshot per round trip,
+   reported next to the CPU and raw baselines with a gpu-marked smoke test.
+   Extending it with CUDA event-aware async behavior remains future work.
 2. Add actual GPU CI hardware and test the minimum/newest supported PyTorch
    versions; the current GitHub workflow remains CPU-only.
 3. Rebuild hosted Read the Docs and enable a normal public issue-reporting path.

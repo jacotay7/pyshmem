@@ -100,6 +100,52 @@ def test_instance_does_not_expose_module_factory_methods(shm_name):
     assert not hasattr(shm, "create")
     assert not hasattr(shm, "open")
 
+
+def test_shmpipeline_private_coupling_contract(shm_name):
+    """shmpipeline intentionally reaches into these private names for speed
+    (see CLAUDE.md "Coupling with shmpipeline"). This test pins the surface so
+    a refactor that renames or re-signs any of them fails here instead of
+    silently breaking shmpipeline's runtime and shm_cleanup.
+    """
+    import inspect
+
+    # Module-level segment-name / lock-path helpers: name -> str.
+    for fn_name in (
+        "_data_name",
+        "_metadata_name",
+        "_gpu_handle_name",
+        "_lock_path",
+    ):
+        fn = getattr(pyshmem_shared, fn_name)
+        assert callable(fn), fn_name
+        params = list(inspect.signature(fn).parameters)
+        assert params and params[0] == "name", fn_name
+
+    # Per-process GPU tensor cache used by shm_cleanup.
+    assert isinstance(pyshmem_shared._LOCAL_GPU_TENSORS, dict)
+
+    # Instance-level write-bracket fast path: no positional args beyond self.
+    for method in ("_mark_write_started", "_finish_write"):
+        member = getattr(pyshmem.SharedMemory, method)
+        assert callable(member), method
+        assert list(inspect.signature(member).parameters) == ["self"], method
+
+    # The names shmpipeline computes must equal the real POSIX segment ids and
+    # the zero-copy view attribute must exist on a live handle.
+    shm = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
+    try:
+        assert shm._data_shm.name == pyshmem_shared._data_name(shm_name)
+        assert shm._metadata_shm.name == pyshmem_shared._metadata_name(
+            shm_name
+        )
+        assert os.path.basename(
+            pyshmem_shared._lock_path(shm_name)
+        ).startswith(pyshmem_shared._segment_base_name(shm_name))
+        assert isinstance(shm._array, np.ndarray)
+        assert shm._array.shape == (4,)
+    finally:
+        shm.unlink()
+
     shm.close()
 
 

@@ -1,41 +1,55 @@
 {
   "benchmark": "spawned_process_ping_pong",
-  "created_at": "2026-07-11T06:42:41.911245+00:00",
+  "created_at": "2026-07-11T08:11:15.042890+00:00",
   "environment": {
+    "cuda_device": "NVIDIA GeForce RTX 5090",
     "hostname": "HQAOBenchsimulator",
     "machine": "x86_64",
     "numpy": "2.2.6",
-    "pid": 944948,
+    "pid": 965531,
     "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
     "pyshmem": "1.0.5",
-    "python": "3.12.0"
+    "python": "3.12.0",
+    "torch": "2.10.0+cu128"
   },
-  "minimum_repeat_seconds": 0.25,
+  "minimum_repeat_seconds": 1.0,
   "payload_bytes": 65536,
   "results": {
     "pyshmem": {
-      "iterations_per_repeat": 2841,
+      "iterations_per_repeat": 13275,
       "latency_us": {
-        "mean": 85.59255755015839,
-        "p50": 77.69,
-        "p95": 139.381,
-        "p99": 140.03078
+        "mean": 71.7344026967985,
+        "p50": 60.45,
+        "p95": 112.861,
+        "p99": 115.94
       },
-      "repeats": 3,
-      "roundtrips_per_second": 11683.258785835282,
-      "samples": 8523
+      "repeats": 5,
+      "roundtrips_per_second": 13940.312631119603,
+      "samples": 66375
+    },
+    "pyshmem_gpu": {
+      "iterations_per_repeat": 4779,
+      "latency_us": {
+        "mean": 204.06922218037246,
+        "p50": 189.891,
+        "p95": 232.83429999999998,
+        "p99": 241.00314
+      },
+      "repeats": 5,
+      "roundtrips_per_second": 4900.297993570638,
+      "samples": 23895
     },
     "raw_shared_memory": {
-      "iterations_per_repeat": 4578,
+      "iterations_per_repeat": 16631,
       "latency_us": {
-        "mean": 55.26022062035823,
-        "p50": 52.67,
-        "p95": 62.86214999999987,
-        "p99": 107.37067
+        "mean": 58.990442679333775,
+        "p50": 53.58,
+        "p95": 104.1,
+        "p99": 108.53514000000006
       },
-      "repeats": 3,
-      "roundtrips_per_second": 18096.19992055539,
-      "samples": 13734
+      "repeats": 5,
+      "roundtrips_per_second": 16951.89855475236,
+      "samples": 83155
     }
   },
   "schema_version": 1
