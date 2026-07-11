@@ -4,7 +4,10 @@ Status date: 2026-07-10
 
 Baseline reviewed: `517ab7c`, pyshmem 1.0.5
 
-Scope: first remediation batch following the critical adopter review
+Scope: cumulative remediation following the critical adopter review
+
+Platform decision: Windows support was intentionally removed. The supported
+surface is Linux and macOS; CUDA support is Linux-only.
 
 ## Completed
 

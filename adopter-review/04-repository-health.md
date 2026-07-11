@@ -22,7 +22,8 @@ and changelog policies have now been added.
 
 - The source is small enough to audit and has a surprisingly extensive test
   suite: 120 tests passed locally with real CUDA.
-- CPU CI spans Ubuntu, macOS, and Windows on Python 3.10-3.13.
+- CPU CI spans Ubuntu and macOS on Python 3.9-3.13. Windows support was
+  intentionally removed.
 - Lint, format, docs-as-warnings, package build, wheel smoke install, and twine
   validation are automated.
 - PyPI publishing uses OIDC trusted publishing and PyPI shows provenance
@@ -119,22 +120,18 @@ ordinary in-process classes.
 
 ## Documentation and public-facing inconsistencies
 
-1. README lines 337-345 say users must pass `gpu_device` and omission gives a
-   CPU-only handle. Current code and the earlier README quick start say omission
-   auto-attaches to the recorded GPU. These are mutually exclusive instructions.
+1. **Resolved:** README and repository docs consistently say omission
+   auto-attaches to the recorded GPU and `gpu_device=False` selects a CPU mirror.
 2. The hosted Read the Docs `latest/gpu.html` still said "Always pass
    gpu_device" on 2026-07-10, while repository docs say auto-attach. The hosted
    documentation is behind the released source behavior.
-3. The user guide says CPU accepts "any NumPy dtype"; the fixed table accepts
-   only 11.
-4. The platform/persistence message is easy to overread: Linux CPU segments can
-   persist without a process, CUDA allocations cannot provide the same
-   no-producer semantics, Windows drops the last-handle object, and discovery is
-   Linux-specific.
-5. Benchmark methodology and results appear in README but not as versioned raw
-   artifacts with a reproducible sweep command.
-6. `out` is described as zero-copy in implementation documentation even though
-   it performs a copy; on GPU it is silently ignored.
+3. **Resolved:** dtype documentation lists the actual supported table.
+4. **Resolved:** platform docs distinguish persistent CPU segments, CUDA
+   producer lifetime, Linux-only discovery, and explicitly unsupported Windows.
+5. **Resolved for CPU:** a reproducible process benchmark and versioned JSON
+   result are checked in; CUDA still needs an equivalent baseline.
+6. **Resolved:** `out` is documented as zero-allocation and unsupported GPU or
+   unsafe combinations raise rather than being ignored.
 
 ## Coverage interpretation
 

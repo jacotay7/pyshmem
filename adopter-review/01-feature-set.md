@@ -83,7 +83,8 @@ Other missing data features that potential adopters commonly need:
 ## Discovery and lifecycle gaps
 
 Names and introspection are convenient on Linux, but `list_streams()` and
-`purge()` return no useful discovery on macOS or Windows. There is no namespace,
+`purge()` returns no useful discovery on macOS. Windows is intentionally outside
+the supported platform set. There is no namespace,
 owner/application tag, lease, TTL, or scoped cleanup. All users of a process
 must also agree on `PYSHMEM_LOCK_DIR`; otherwise they can access the same data
 while taking different locks.
@@ -113,8 +114,8 @@ payloads, CUDA handles, and CUDA allocations.
 1. A capacity-N ring buffer with block/drop policies for applications that need
    every item. The existing capacity-one exchange now reports per-handle
    overruns through `missed_writes` and `total_missed_writes`.
-2. Waitable notifications (Linux futex/eventfd, Windows event, portable
-   semaphore fallback) instead of micro-sleeps.
+2. Waitable notifications (Linux futex/eventfd with a portable POSIX semaphore
+   fallback) instead of micro-sleeps.
 3. Explicit semantic profiles: `latest_value`, `queue`, and perhaps
    immutable/snapshot.
 4. A backend-neutral tensor interface using DLPack/array protocols, while
