@@ -40,20 +40,20 @@ PyTorch 2.10, RTX 5090):
      - p95
      - p99
    * - pyshmem (CPU)
-     - 13,940
-     - 60.45 us
-     - 112.86 us
-     - 115.94 us
+     - 13,988
+     - 60.26 us
+     - 111.69 us
+     - 115.70 us
    * - pyshmem (GPU IPC)
-     - 4,900
-     - 189.89 us
-     - 232.83 us
-     - 241.00 us
+     - 4,872
+     - 189.25 us
+     - 239.00 us
+     - 240.98 us
    * - Raw shared memory polling
-     - 16,952
-     - 53.58 us
-     - 104.10 us
-     - 108.54 us
+     - 16,492
+     - 57.58 us
+     - 104.45 us
+     - 108.95 us
 
 These are one-machine observations, not universal performance claims; rerun the
 harness on the intended deployment host.

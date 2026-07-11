@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import builtins
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import ctypes
 import ctypes.util
 import glob
@@ -1412,6 +1412,54 @@ def list_streams() -> list[str]:
     return sorted(result)
 
 
+def stat(name: str) -> dict[str, Any]:
+    """Return validated stream metadata without attaching payload storage.
+
+    Unlike :func:`open`, this helper never maps the CPU payload or CUDA IPC
+    handle.  It is intended for managers that need to compare an existing
+    stream with a declarative configuration before choosing to attach, replace,
+    or report an ownership conflict.
+    """
+    try:
+        metadata_shm = _attach_segment(_metadata_name(name))
+    except FileNotFoundError as exc:
+        raise _missing_name_error(name) from exc
+    try:
+        metadata = _MetadataView(metadata_shm.buf)
+        decoded = _decode_metadata_header(
+            metadata, metadata_shm, expected_name=name
+        )
+        flags = int(metadata._v3["flags"]) if metadata._v3 is not None else 0
+        device_index = decoded["device_index"]
+        return {
+            "name": name,
+            "shape": list(decoded["shape"]),
+            "dtype": str(decoded["dtype"]),
+            "size": decoded["size"],
+            "gpu_enabled": decoded["gpu_enabled"],
+            "gpu_device": (
+                None if not decoded["gpu_enabled"] else f"cuda:{device_index}"
+            ),
+            "cpu_mirror": decoded["cpu_mirror"],
+            "notify": bool(flags & METADATA_FLAG_NOTIFY),
+            "instance_id": (
+                None
+                if decoded["instance_id"] is None
+                else decoded["instance_id"].hex()
+            ),
+            "creator_pid": decoded["creator_pid"],
+            "creator_alive": _pid_is_alive(decoded["creator_pid"]),
+            "count": int(metadata.load_count_acquire()),
+            "write_sequence": int(metadata.load_sequence_acquire()),
+            "write_time": float(metadata[METADATA_INDEX_WRITE_TIME]),
+        }
+    finally:
+        try:
+            metadata_shm.close()
+        except Exception:
+            pass
+
+
 class SharedMemory:
     """A named shared-memory stream.
 
@@ -1840,35 +1888,6 @@ class SharedMemory:
         deadline = (
             None if timeout is None else time.monotonic() + float(timeout)
         )
-        if self.cpu_mirror:
-            while True:
-                remaining = (
-                    None
-                    if deadline is None
-                    else max(0.0, deadline - time.monotonic())
-                )
-                start_sequence = self._wait_for_stable_writer(
-                    poll_interval, timeout=remaining
-                )
-                cpu_snapshot = np.copy(self._array)
-                remaining = (
-                    None
-                    if deadline is None
-                    else max(0.0, deadline - time.monotonic())
-                )
-                end_sequence, end_count = self._sample_publication_state(
-                    timeout=remaining, poll_interval=poll_interval
-                )
-                if start_sequence == end_sequence:
-                    self._record_read(end_count)
-                    result = torch.as_tensor(
-                        cpu_snapshot,
-                        dtype=self._torch_dtype,
-                        device=self.gpu_device,
-                    )
-                    _synchronize_cuda_operation(self.gpu_device)
-                    return result
-
         while True:
             remaining = (
                 None
@@ -2541,6 +2560,113 @@ class SharedMemory:
         )
         return self.read(safe=safe, out=out, timeout=remaining)
 
+    def wait_for_count(
+        self,
+        *,
+        after: int,
+        timeout: float | None = None,
+        poll_interval: float = 1e-5,
+    ) -> int:
+        """Wait until a completed publication count is greater than ``after``.
+
+        This is the level-triggered counterpart to :meth:`read_new`.  It is
+        safe for lock-step pipelines and request/reply exchanges because a
+        publication that happened before this method was called still
+        satisfies the level check.  On notify-enabled Linux streams the wait
+        parks on the shared futex; other platforms use the normal polling
+        fallback.
+        """
+        self._ensure_open("wait for a write on")
+        try:
+            baseline = int(after)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("after must be an integer") from exc
+        if baseline < 0:
+            raise ValueError("after must be non-negative")
+        if timeout is not None and float(timeout) < 0.0:
+            raise ValueError("timeout must be non-negative")
+
+        start = time.monotonic()
+        deadline = None if timeout is None else start + float(timeout)
+        while True:
+            remaining = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            sequence, count = self._sample_publication_state(
+                timeout=remaining, poll_interval=poll_interval
+            )
+            if sequence < 0:
+                raise InconsistentStreamError(
+                    f"stream {self.name!r} contains an incomplete write; "
+                    "a successful write is required before it can be read"
+                )
+            if sequence % 2 == 1:
+                if self._invalidate_abandoned_write(sequence):
+                    raise InconsistentStreamError(
+                        f"writer process for stream {self.name!r} exited "
+                        "during a write; a successful write is required "
+                        "before it can be read"
+                    )
+            elif count > baseline:
+                return count
+
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"timed out waiting for stream {self.name!r} to pass "
+                    f"count {baseline}"
+                )
+            remaining = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            self._wait_for_publication(poll_interval, remaining)
+
+    def read_after(
+        self,
+        after: int,
+        *,
+        timeout: float | None = None,
+        safe: bool = True,
+        poll_interval: float = 1e-5,
+        out=None,
+    ):
+        """Read the first completed publication after ``after``.
+
+        The return value has the same type as :meth:`read`; the associated
+        publication count is available as :attr:`last_read_count`, and skipped
+        generations are reported by :attr:`missed_writes`.  The count wait and
+        snapshot share one deadline, so this method is suitable for a
+        level-triggered worker loop without reimplementing pyshmem's sequence
+        and abandoned-writer handling.
+        """
+        self._ensure_open("read from")
+        try:
+            baseline = int(after)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("after must be an integer") from exc
+        if baseline < 0:
+            raise ValueError("after must be non-negative")
+        start = time.monotonic()
+        self.wait_for_count(
+            after=baseline,
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+        remaining = (
+            None
+            if timeout is None
+            else max(0.0, float(timeout) - (time.monotonic() - start))
+        )
+        return self.read(
+            safe=safe,
+            poll_interval=poll_interval,
+            out=out,
+            timeout=remaining,
+        )
+
     def write_locked(self, value: Any) -> None:
         """Write a payload without acquiring the lock.
 
@@ -2593,6 +2719,74 @@ class SharedMemory:
                 raise
             else:
                 self._finish_write()
+
+    @contextmanager
+    def write_view(self, *, timeout: float | None = None):
+        """Yield a live writable payload view and publish it on success.
+
+        The stream lock is held for the complete lifetime of the context.  A
+        NumPy array is yielded for CPU streams and an attached CUDA tensor for
+        GPU streams.  The sequence is marked in-progress before yielding;
+        normal exit publishes the payload, while any exception aborts the
+        generation so readers receive :class:`InconsistentStreamError` rather
+        than a torn value.  GPU CPU mirrors and CUDA stream synchronization are
+        handled here rather than by consumers.
+        """
+        self._ensure_open("write to")
+        self._ensure_writable("write to")
+        with self.locked(timeout=timeout):
+            with self.write_view_locked() as view:
+                yield view
+
+    @contextmanager
+    def write_view_locked(self):
+        """Yield a writable view while the caller-owned lock is held.
+
+        This is the zero-copy publication primitive for callers that already
+        acquire several stream locks in a deterministic order.  It never
+        acquires or releases the process-shared lock itself; use
+        :meth:`write_view` for a standalone write.
+        """
+        self._ensure_open("write to")
+        self._ensure_writable("write to")
+        if not self._lock_owned_by_current_thread():
+            raise RuntimeError(
+                "write_view_locked() requires an active 'with shm.locked()' "
+                "block"
+            )
+        if (
+            self._gpu_tensor is None
+            and self.gpu_enabled
+            and not self.cpu_mirror
+        ):
+            raise RuntimeError(
+                "cannot write to GPU shared memory without a GPU attachment; "
+                "reopen it with "
+                f"pyshmem.open({self.name!r}, gpu_device='cuda:N')"
+            )
+
+        self._mark_write_started()
+        view = (
+            self._gpu_tensor if self._gpu_tensor is not None else self._array
+        )
+        try:
+            yield view
+        except BaseException:
+            self._abort_write()
+            raise
+        else:
+            try:
+                if self._gpu_tensor is not None:
+                    if self.cpu_mirror:
+                        np.copyto(
+                            self._array,
+                            self._gpu_tensor.detach().cpu().numpy(),
+                        )
+                    _synchronize_cuda_operation(self.gpu_device)
+            except BaseException:
+                self._abort_write()
+                raise
+            self._finish_write()
 
     async def read_new_async(
         self,
@@ -2981,6 +3175,35 @@ def open(
     write-lock acquisition, unsafe shared views, and handle-level unlink.
     """
     return SharedMemory._open(name, gpu_device=gpu_device, readonly=readonly)
+
+
+@contextmanager
+def locked_many(
+    streams: Sequence[SharedMemory], *, timeout: float | None = None
+):
+    """Acquire several streams in deterministic name order.
+
+    The handles are yielded in the caller's original order.  Acquisition uses
+    one deadline across all locks, which prevents a multi-stream pipeline from
+    accidentally waiting longer than its configured timeout while collecting
+    locks one at a time.  Each handle remains locked until the context exits.
+    """
+    handles = tuple(streams)
+    names = [handle.name for handle in handles]
+    if len(set(names)) != len(names):
+        raise ValueError("locked_many() requires unique stream names")
+    if timeout is not None and float(timeout) < 0.0:
+        raise ValueError("timeout must be non-negative")
+    deadline = None if timeout is None else time.monotonic() + float(timeout)
+    with ExitStack() as stack:
+        for handle in sorted(handles, key=lambda item: item.name):
+            remaining = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            stack.enter_context(handle.locked(timeout=remaining))
+        yield handles
 
 
 @contextmanager

@@ -30,7 +30,8 @@ import numpy as np
 import pyshmem
 
 writer = pyshmem.create("frames", shape=(480, 640), dtype=np.float32)
-writer.write(np.ones((480, 640), dtype=np.float32))
+with writer.write_view() as frame:
+    frame[...] = 1.0                 # zero-copy, exception-safe publish
 ```
 
 Attach and read from another:
@@ -41,6 +42,7 @@ import pyshmem
 reader = pyshmem.open("frames")
 frame = reader.read()                    # latest consistent snapshot
 next_frame = reader.read_new(timeout=1) # wait for the next publication
+next_frame = reader.read_after(reader.last_read_count, timeout=1)
 print(reader.missed_writes)
 
 reader.close()
@@ -84,9 +86,9 @@ On the primary Linux development machine (Python 3.12, NumPy 2.2.6, PyTorch
 
 | Implementation | Round trips/s | p50 | p95 | p99 |
 |---|---:|---:|---:|---:|
-| pyshmem (CPU) | 13,940 | 60.45 µs | 112.86 µs | 115.94 µs |
-| pyshmem (GPU IPC) | 4,900 | 189.89 µs | 232.83 µs | 241.00 µs |
-| Raw shared memory polling | 16,952 | 53.58 µs | 104.10 µs | 108.54 µs |
+| pyshmem (CPU) | 13,988 | 60.26 µs | 111.69 µs | 115.70 µs |
+| pyshmem (GPU IPC) | 4,872 | 189.25 µs | 239.00 µs | 240.98 µs |
+| Raw shared memory polling | 16,492 | 57.58 µs | 104.45 µs | 108.95 µs |
 
 The raw baseline omits pyshmem's locking, metadata validation, discovery, and
 consistent snapshots. The GPU row is a separate spawned process mapping the

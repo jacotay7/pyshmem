@@ -101,52 +101,41 @@ def test_instance_does_not_expose_module_factory_methods(shm_name):
     assert not hasattr(shm, "open")
 
 
-def test_shmpipeline_private_coupling_contract(shm_name):
-    """shmpipeline intentionally reaches into these private names for speed
-    (see CLAUDE.md "Coupling with shmpipeline"). This test pins the surface so
-    a refactor that renames or re-signs any of them fails here instead of
-    silently breaking shmpipeline's runtime and shm_cleanup.
-    """
-    import inspect
-
-    # Module-level segment-name / lock-path helpers: name -> str.
-    for fn_name in (
-        "_data_name",
-        "_metadata_name",
-        "_gpu_handle_name",
-        "_lock_path",
-    ):
-        fn = getattr(pyshmem_shared, fn_name)
-        assert callable(fn), fn_name
-        params = list(inspect.signature(fn).parameters)
-        assert params and params[0] == "name", fn_name
-
-    # Per-process GPU tensor cache used by shm_cleanup.
-    assert isinstance(pyshmem_shared._LOCAL_GPU_TENSORS, dict)
-
-    # Instance-level write-bracket fast path: no positional args beyond self.
-    for method in ("_mark_write_started", "_finish_write"):
-        member = getattr(pyshmem.SharedMemory, method)
-        assert callable(member), method
-        assert list(inspect.signature(member).parameters) == ["self"], method
-
-    # The names shmpipeline computes must equal the real POSIX segment ids and
-    # the zero-copy view attribute must exist on a live handle.
+def test_public_shmpipeline_integration_contract(shm_name):
+    """The zero-copy integration surface is public and exception-safe."""
     shm = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
     try:
-        assert shm._data_shm.name == pyshmem_shared._data_name(shm_name)
-        assert shm._metadata_shm.name == pyshmem_shared._metadata_name(
-            shm_name
+        with shm.write_view() as view:
+            assert isinstance(view, np.ndarray)
+            view[...] = np.arange(4, dtype=np.float32)
+        np.testing.assert_array_equal(
+            shm.read(), np.arange(4, dtype=np.float32)
         )
-        assert os.path.basename(
-            pyshmem_shared._lock_path(shm_name)
-        ).startswith(pyshmem_shared._segment_base_name(shm_name))
-        assert isinstance(shm._array, np.ndarray)
-        assert shm._array.shape == (4,)
+        assert shm.wait_for_count(after=0, timeout=1.0) == 1
+        info = pyshmem.stat(shm_name)
+        assert info["shape"] == [4]
+        assert info["dtype"] == "float32"
     finally:
         shm.unlink()
 
-    shm.close()
+
+def test_locked_many_acquires_unique_handles_and_rejects_duplicates(shm_name):
+    first = pyshmem.create(f"{shm_name}_a", shape=(1,), dtype=np.float32)
+    second = pyshmem.create(f"{shm_name}_b", shape=(1,), dtype=np.float32)
+
+    with pyshmem.locked_many([second, first], timeout=1.0) as handles:
+        assert handles == (second, first)
+        with first.write_view_locked() as view:
+            view[...] = [1.0]
+        with second.write_view_locked() as view:
+            view[...] = [2.0]
+
+    with pytest.raises(ValueError, match="unique"):
+        with pyshmem.locked_many([first, first]):
+            pass
+
+    first.unlink()
+    second.unlink()
 
 
 def test_create_write_read_round_trip_cpu(shm_name):
@@ -1584,6 +1573,83 @@ def test_write_locked_is_visible_to_safe_read(shm_name):
 
     reader.close()
     writer.close()
+
+
+def test_write_view_publishes_zero_copy_payload(shm_name):
+    writer = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
+    reader = pyshmem.open(shm_name, readonly=True)
+
+    with writer.write_view() as view:
+        assert isinstance(view, np.ndarray)
+        view[...] = [4.0, 3.0, 2.0, 1.0]
+
+    np.testing.assert_array_equal(reader.read(), [4.0, 3.0, 2.0, 1.0])
+    reader.close()
+    writer.unlink()
+
+
+def test_write_view_aborts_publication_on_exception(shm_name):
+    writer = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    reader = pyshmem.open(shm_name)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with writer.write_view() as view:
+            view[...] = [8.0, 9.0]
+            raise RuntimeError("boom")
+
+    with pytest.raises(pyshmem.InconsistentStreamError):
+        reader.read(timeout=0.1)
+
+    reader.close()
+    writer.unlink()
+
+
+def test_write_view_locked_requires_lock_and_publishes(shm_name):
+    shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+
+    with pytest.raises(RuntimeError, match="write_view_locked"):
+        with shm.write_view_locked():
+            pass
+
+    with shm.locked():
+        with shm.write_view_locked() as view:
+            view[...] = [1.5, 2.5]
+
+    np.testing.assert_array_equal(shm.read(), [1.5, 2.5])
+    shm.unlink()
+
+
+def test_wait_for_count_is_level_triggered(shm_name):
+    writer = pyshmem.create(shm_name, shape=(1,), dtype=np.float32)
+    reader = pyshmem.open(shm_name)
+    writer.write(np.array([7.0], dtype=np.float32))
+
+    assert reader.wait_for_count(after=0, timeout=1.0) == 1
+    np.testing.assert_array_equal(reader.read_after(0, timeout=1.0), [7.0])
+    assert reader.last_read_count == 1
+
+    reader.close()
+    writer.unlink()
+
+
+def test_stat_reads_metadata_without_attaching_payload(shm_name):
+    shm = pyshmem.create(
+        shm_name,
+        shape=(2, 3),
+        dtype=np.float32,
+        notify=True,
+    )
+    info = pyshmem.stat(shm_name)
+
+    assert info["name"] == shm_name
+    assert info["shape"] == [2, 3]
+    assert info["dtype"] == "float32"
+    assert info["gpu_enabled"] is False
+    assert info["notify"] is True
+    assert info["creator_pid"] == os.getpid()
+    assert info["creator_alive"] is True
+
+    shm.unlink()
 
 
 # ---------------------------------------------------------------------------

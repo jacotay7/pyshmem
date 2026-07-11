@@ -22,6 +22,10 @@ Top-level functions and constants
 
 .. autofunction:: pyshmem.list_streams
 
+.. autofunction:: pyshmem.stat
+
+.. autofunction:: pyshmem.locked_many
+
 .. autofunction:: pyshmem.gpu_available
 
 .. autoexception:: pyshmem.InconsistentStreamError

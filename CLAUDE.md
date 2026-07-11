@@ -81,19 +81,26 @@ data = shm.read()         # returns np.ndarray (CPU) or torch.Tensor (GPU)
 data = shm.read(out=buf)  # zero-alloc: writes into pre-allocated buffer
 data = shm.read_new(timeout=1.0)         # blocks until a new write arrives
 data = await shm.read_new_async(timeout=1.0)  # asyncio-safe variant
+count = shm.wait_for_count(after=last_count, timeout=1.0)  # level-triggered
+data = shm.read_after(last_count, timeout=1.0)
 
 # Locking (explicit)
 shm.acquire(timeout=0.5)
 shm.read(safe=False)           # zero-copy view — only valid inside lock
 shm.write_locked(value)        # write without re-acquiring lock (shmpipeline fast path)
+with shm.write_view() as output:  # zero-copy, exception-safe publication
+    output[...] = value
 shm.release()
 
 # Context manager
 with shm.locked():
     shm.read(safe=False)
     shm.write_locked(new_value)
+with pyshmem.locked_many([input_stream, output_stream]):
+    ...
 
 # Metadata
+pyshmem.stat("my_stream")   # metadata-only attach/reuse inspection
 shm.describe()             # human-readable summary string
 cfg = shm.to_config()      # dict: name/shape/dtype/gpu_device/cpu_mirror
 shm2 = pyshmem.SharedMemory.create_from_config(cfg)
@@ -226,18 +233,17 @@ python -m pytest tests/test_cpu_api.py -q   # must be green before any merge
 
 ## Package Info
 
-- Package name on PyPI: `pyshmem` (v1.0.6)
+- Package name on PyPI: `pyshmem` (v1.1.0)
 - License: GPL-3.0-only
 - Required deps: `numpy>=1.26,<3`, `portalocker>=3.1`
 - Optional deps: `torch>=2.2` (GPU support)
 - Python: 3.9–3.13
 - GitHub: `https://github.com/jacotay7/pyshmem`
 
-## Coupling with shmpipeline
+## Integration with shmpipeline
 
-`shmpipeline` intentionally accesses several private `pyshmem` attributes for performance:
-- `_mark_write_started()`, `_finish_write()` — bracket writes without acquiring locks (used when the worker already holds the lock)
-- `_array` — zero-copy view into the CPU data segment
-- `_LOCAL_GPU_TENSORS`, `_data_name`, `_metadata_name`, `_gpu_handle_name`, `_lock_path` — used by `shmpipeline.shm_cleanup` for direct POSIX unlink without going through the resource tracker
-
-Any changes to these private names must also update `shmpipeline/src/shmpipeline/runtime.py` and `shmpipeline/src/shmpipeline/shm_cleanup.py`.
+shmpipeline consumes only pyshmem's public stream API. Its worker runtime uses
+sorted `locked()` scopes, safe GPU snapshots, `write_view_locked()` output
+transactions, `wait_for_count()`/`read_after()` level-triggered waits, and
+`unlink_quiet()` cleanup. Private segment names, CUDA caches, and publication
+fields are implementation details and must not become an integration contract.

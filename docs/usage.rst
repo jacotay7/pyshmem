@@ -274,6 +274,23 @@ is not blocked while waiting:
 
    asyncio.run(consumer())
 
+Level-triggered pipeline waits
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For a consumer that tracks the last generation it handled, use
+:meth:`~pyshmem.SharedMemory.wait_for_count` or
+:meth:`~pyshmem.SharedMemory.read_after`. Unlike ``read_new``, these methods
+do not snapshot a baseline at call time and therefore cannot miss a write that
+was published before the wait began:
+
+.. code-block:: python
+
+   last_count = 0
+   while True:
+       frame = stream.read_after(last_count, timeout=1.0)
+       last_count = stream.last_read_count
+       process(frame)
+
 Waitable notifications
 ~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -363,6 +380,34 @@ step:
        # perform computation, then write the result in one lock ownership
        output_stream.write_locked(compute(input_data))
 
+Zero-copy write transactions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:meth:`~pyshmem.SharedMemory.write_view` holds the stream lock and yields the
+live NumPy array or attached CUDA tensor. Normal exit commits the publication;
+an exception aborts it, so readers never mistake a partial computation for a
+completed frame. ``write_view_locked`` is the equivalent for callers that
+already hold a lock while coordinating several streams:
+
+.. code-block:: python
+
+   with output_stream.write_view() as output:
+       kernel.compute_into(input_frame, output, auxiliaries)
+
+   with output_stream.locked():
+       with output_stream.write_view_locked() as output:
+           kernel.compute_into(input_frame, output, auxiliaries)
+
+For a multi-stream pipeline, :func:`pyshmem.locked_many` acquires handles in
+deterministic name order with one shared timeout deadline:
+
+.. code-block:: python
+
+   with pyshmem.locked_many([input_stream, output_stream], timeout=1.0):
+       input_view = input_stream.read(safe=False)
+       with output_stream.write_view_locked() as output:
+           kernel.compute_into(input_view, output, {})
+
 Discovering streams
 -------------------
 
@@ -389,6 +434,18 @@ The same listing is available from the shell with ``pyshmem list`` — see
 
 Inspecting streams
 ------------------
+
+Metadata-only inspection
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+:func:`pyshmem.stat` validates and returns stream metadata without mapping the
+payload segment or a CUDA IPC handle. It is useful for managers deciding
+whether an existing stream is compatible before attaching or replacing it:
+
+.. code-block:: python
+
+   info = pyshmem.stat("my_stream")
+   # info["shape"], info["dtype"], info["creator_alive"], info["count"]
 
 Human-readable summary
 ~~~~~~~~~~~~~~~~~~~~~~

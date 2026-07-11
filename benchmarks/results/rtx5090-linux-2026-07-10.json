@@ -1,14 +1,14 @@
 {
   "benchmark": "spawned_process_ping_pong",
-  "created_at": "2026-07-11T08:11:15.042890+00:00",
+  "created_at": "2026-07-11T19:54:22.345396+00:00",
   "environment": {
     "cuda_device": "NVIDIA GeForce RTX 5090",
     "hostname": "HQAOBenchsimulator",
     "machine": "x86_64",
     "numpy": "2.2.6",
-    "pid": 965531,
+    "pid": 1032885,
     "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
-    "pyshmem": "1.0.5",
+    "pyshmem": "1.1.0",
     "python": "3.12.0",
     "torch": "2.10.0+cu128"
   },
@@ -16,40 +16,40 @@
   "payload_bytes": 65536,
   "results": {
     "pyshmem": {
-      "iterations_per_repeat": 13275,
+      "iterations_per_repeat": 13345,
       "latency_us": {
-        "mean": 71.7344026967985,
-        "p50": 60.45,
-        "p95": 112.861,
-        "p99": 115.94
+        "mean": 71.48985345822405,
+        "p50": 60.261,
+        "p95": 111.691,
+        "p99": 115.701
       },
       "repeats": 5,
-      "roundtrips_per_second": 13940.312631119603,
-      "samples": 66375
+      "roundtrips_per_second": 13987.999018411221,
+      "samples": 66725
     },
     "pyshmem_gpu": {
-      "iterations_per_repeat": 4779,
+      "iterations_per_repeat": 4828,
       "latency_us": {
-        "mean": 204.06922218037246,
-        "p50": 189.891,
-        "p95": 232.83429999999998,
-        "p99": 241.00314
+        "mean": 205.26610911350457,
+        "p50": 189.251,
+        "p95": 239.001,
+        "p99": 240.97771000000003
       },
       "repeats": 5,
-      "roundtrips_per_second": 4900.297993570638,
-      "samples": 23895
+      "roundtrips_per_second": 4871.724827438694,
+      "samples": 24140
     },
     "raw_shared_memory": {
-      "iterations_per_repeat": 16631,
+      "iterations_per_repeat": 16481,
       "latency_us": {
-        "mean": 58.990442679333775,
-        "p50": 53.58,
-        "p95": 104.1,
-        "p99": 108.53514000000006
+        "mean": 60.636087082094534,
+        "p50": 57.58,
+        "p95": 104.45,
+        "p99": 108.951
       },
       "repeats": 5,
-      "roundtrips_per_second": 16951.89855475236,
-      "samples": 83155
+      "roundtrips_per_second": 16491.82933994588,
+      "samples": 82405
     }
   },
   "schema_version": 1

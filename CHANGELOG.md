@@ -3,6 +3,19 @@
 All notable user-facing changes are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## 1.1.0 - 2026-07-11
+
+### Integration and performance
+
+- Added exception-safe zero-copy `SharedMemory.write_view()` and
+  `write_view_locked()` transactions for direct CPU/GPU publication.
+- Added level-triggered `wait_for_count()` and `read_after()` APIs for
+  consumers that track a publication generation.
+- Added metadata-only `pyshmem.stat()` for attach/reuse decisions without
+  mapping payload or CUDA IPC storage.
+- Attached GPU consumers now read consistent snapshots from the device tensor
+  even when a CPU mirror exists; CPU-only handles continue to consume mirrors.
+
 ## 1.0.6 - 2026-07-10
 
 A large reliability, correctness, security, and ecosystem release.

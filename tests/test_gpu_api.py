@@ -1044,6 +1044,29 @@ def test_gpu_write_locked_raises_without_active_lock(shm_name):
     shm.close()
 
 
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_write_view_publishes_shared_tensor_and_mirror(shm_name):
+    writer = pyshmem.create(
+        shm_name,
+        shape=(3,),
+        dtype=np.float32,
+        gpu_device="cuda:0",
+        cpu_mirror=True,
+    )
+    reader = pyshmem.open(shm_name, gpu_device="cuda:0")
+    mirror = pyshmem.open(shm_name, gpu_device=False)
+
+    with writer.write_view() as view:
+        view.copy_(torch.tensor([2.0, 4.0, 6.0], device="cuda:0"))
+
+    assert torch.equal(reader.read().cpu(), torch.tensor([2.0, 4.0, 6.0]))
+    np.testing.assert_array_equal(mirror.read(), [2.0, 4.0, 6.0])
+
+    mirror.close()
+    reader.close()
+    writer.unlink()
+
+
 # ---------------------------------------------------------------------------
 # describe on GPU streams (#13)
 # ---------------------------------------------------------------------------
