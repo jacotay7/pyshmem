@@ -275,6 +275,61 @@ def test_unregister_uses_platform_expected_shared_memory_name(monkeypatch):
         assert calls == [("/ps_test_meta", "shared_memory")]
 
 
+def test_supports_track_matches_shared_memory_signature():
+    import inspect
+    from multiprocessing import shared_memory
+
+    params = inspect.signature(shared_memory.SharedMemory).parameters
+    assert pyshmem_shared._shared_memory_supports_track() == (
+        "track" in params
+    )
+
+
+def test_attach_segment_uses_track_false_when_supported(monkeypatch):
+    captured: dict = {}
+
+    class _FakeShm:
+        def __init__(self, *, name, create, size, track):
+            captured["name"] = name
+            captured["create"] = create
+            captured["size"] = size
+            captured["track"] = track
+
+    def _fail_unregister(shm):
+        raise AssertionError("must not fall back to resource_tracker")
+
+    monkeypatch.setattr(pyshmem_shared, "_SHM_SUPPORTS_TRACK", True)
+    monkeypatch.setattr(pyshmem_shared.shared_memory, "SharedMemory", _FakeShm)
+    monkeypatch.setattr(pyshmem_shared, "_unregister", _fail_unregister)
+
+    result = pyshmem_shared._attach_segment("ps_probe", create=True, size=8)
+    assert isinstance(result, _FakeShm)
+    assert captured == {
+        "name": "ps_probe",
+        "create": True,
+        "size": 8,
+        "track": False,
+    }
+
+
+def test_attach_segment_falls_back_to_unregister_when_unsupported(monkeypatch):
+    unregistered: list = []
+
+    class _FakeShm:
+        def __init__(self, *, name, create, size):
+            self._name = name
+
+    monkeypatch.setattr(pyshmem_shared, "_SHM_SUPPORTS_TRACK", False)
+    monkeypatch.setattr(pyshmem_shared.shared_memory, "SharedMemory", _FakeShm)
+    monkeypatch.setattr(
+        pyshmem_shared, "_unregister", lambda shm: unregistered.append(shm)
+    )
+
+    result = pyshmem_shared._attach_segment("ps_probe")
+    assert isinstance(result, _FakeShm)
+    assert unregistered == [result]
+
+
 def test_cross_process_lock_blocks_explicit_acquire_until_release(shm_name):
     writer = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
     payload = np.arange(4, dtype=np.float32)

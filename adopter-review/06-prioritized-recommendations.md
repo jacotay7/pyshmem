@@ -14,6 +14,10 @@ Detailed evidence is in [Implementation status](00-implementation-status.md).
   events and asynchronous stream ordering remain.
 - P1.5: **partially implemented** with failed-copy, writer-kill, timeout,
   descriptor, purge, and GPU odd-sequence tests.
+- P1.3: **partially implemented** — segment open/create goes through
+  `_attach_segment()`, which uses the public `track=False` on Python 3.13+ and
+  only falls back to the private `resource_tracker` API on <=3.12. Isolating the
+  pickled CUDA reduction trust boundary remains.
 - P1.6: **repository documentation corrected**; hosted docs still need rebuild.
 - Repository hygiene: Python 3.9 CI, complete sdist tests, and obsolete artifact
   removal are **implemented**.

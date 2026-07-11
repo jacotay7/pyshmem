@@ -19,6 +19,7 @@ import hashlib
 import builtins
 from contextlib import contextmanager
 import glob
+import inspect
 import math
 import os
 import pickle
@@ -474,6 +475,22 @@ def _release_file_lock(file_handle) -> None:
     portalocker.unlock(file_handle)
 
 
+def _shared_memory_supports_track() -> bool:
+    """Whether ``SharedMemory`` exposes the public ``track`` argument.
+
+    Python 3.13 added ``track=False`` so a segment can be kept out of the
+    resource tracker without reaching into its private ``unregister`` API.
+    """
+    try:
+        params = inspect.signature(shared_memory.SharedMemory).parameters
+    except (TypeError, ValueError):
+        return False
+    return "track" in params
+
+
+_SHM_SUPPORTS_TRACK = _shared_memory_supports_track()
+
+
 def _unregister(shm: shared_memory.SharedMemory) -> None:
     if os.name == "nt":
         return
@@ -484,6 +501,25 @@ def _unregister(shm: shared_memory.SharedMemory) -> None:
         resource_tracker.unregister(name, "shared_memory")
     except Exception:
         pass
+
+
+def _attach_segment(
+    name: str, *, create: bool = False, size: int = 0
+) -> shared_memory.SharedMemory:
+    """Open or create a segment kept out of the resource tracker.
+
+    On Python 3.13+ this uses the public ``track=False`` argument so the
+    segment is never registered.  On older versions it falls back to
+    constructing the segment and unregistering it via the private
+    ``resource_tracker`` API.
+    """
+    if _SHM_SUPPORTS_TRACK:
+        return shared_memory.SharedMemory(
+            name=name, create=create, size=size, track=False
+        )
+    shm = shared_memory.SharedMemory(name=name, create=create, size=size)
+    _unregister(shm)
+    return shm
 
 
 def _can_directly_unlink_posix_segments() -> bool:
@@ -853,10 +889,9 @@ def _resolve_open_target_device(
 
 def _open_existing_segment(name: str) -> shared_memory.SharedMemory | None:
     try:
-        shm = shared_memory.SharedMemory(name=name)
+        shm = _attach_segment(name)
     except FileNotFoundError:
         return None
-    _unregister(shm)
     return shm
 
 
@@ -987,10 +1022,9 @@ def unlink(name: str) -> None:
 def _stream_name_for_base(base: str) -> str | None:
     """Recover the user-visible name stored in a stream's metadata segment."""
     try:
-        meta_shm = shared_memory.SharedMemory(name=f"{base}_meta")
+        meta_shm = _attach_segment(f"{base}_meta")
     except FileNotFoundError:
         return None
-    _unregister(meta_shm)
     try:
         return _read_stream_name(meta_shm)
     finally:
@@ -1009,10 +1043,9 @@ def _validated_stream_name_for_base(base: str) -> str | None:
     ):
         return None
     try:
-        meta_shm = shared_memory.SharedMemory(name=f"{base}_meta")
+        meta_shm = _attach_segment(f"{base}_meta")
     except FileNotFoundError:
         return None
-    _unregister(meta_shm)
     try:
         if len(meta_shm.buf) < METADATA_TOTAL_BYTES:
             return None
@@ -1405,15 +1438,15 @@ class SharedMemory:
         )
 
         try:
-            data_shm = shared_memory.SharedMemory(
-                name=_data_name(name), create=True, size=normalized_size
+            data_shm = _attach_segment(
+                _data_name(name), create=True, size=normalized_size
             )
         except FileExistsError as exc:
             raise _duplicate_name_error(name) from exc
 
         try:
-            metadata_shm = shared_memory.SharedMemory(
-                name=_metadata_name(name),
+            metadata_shm = _attach_segment(
+                _metadata_name(name),
                 create=True,
                 size=METADATA_TOTAL_BYTES,
             )
@@ -1424,8 +1457,6 @@ class SharedMemory:
             except Exception:
                 pass
             raise _duplicate_name_error(name) from exc
-        _unregister(data_shm)
-        _unregister(metadata_shm)
 
         gpu_handle_shm = None
         gpu_tensor = None
@@ -1512,12 +1543,9 @@ class SharedMemory:
         gpu_device: str | int | bool | None = None,
     ) -> "SharedMemory":
         try:
-            metadata_shm = shared_memory.SharedMemory(
-                name=_metadata_name(name)
-            )
+            metadata_shm = _attach_segment(_metadata_name(name))
         except FileNotFoundError as exc:
             raise _missing_name_error(name) from exc
-        _unregister(metadata_shm)
         try:
             metadata = _MetadataView(metadata_shm.buf)
         except ValueError as exc:
@@ -1542,11 +1570,10 @@ class SharedMemory:
         cpu_mirror_enabled = decoded["cpu_mirror"]
 
         try:
-            data_shm = shared_memory.SharedMemory(name=_data_name(name))
+            data_shm = _attach_segment(_data_name(name))
         except FileNotFoundError as exc:
             metadata_shm.close()
             raise _missing_name_error(name) from exc
-        _unregister(data_shm)
         if data_shm.size != size:
             metadata_shm.close()
             data_shm.close()
@@ -2039,10 +2066,9 @@ def _create_gpu_tensor_and_handle(
     # allocation for the lifetime of the producer process.
     rebuild_fn, rebuild_args = reduce_tensor(gpu_tensor)
     handle_payload = pickle.dumps((rebuild_fn, rebuild_args), protocol=4)
-    handle_shm = shared_memory.SharedMemory(
-        name=_gpu_handle_name(name), create=True, size=len(handle_payload)
+    handle_shm = _attach_segment(
+        _gpu_handle_name(name), create=True, size=len(handle_payload)
     )
-    _unregister(handle_shm)
 
     handle_shm.buf[: len(handle_payload)] = handle_payload
     _cache_gpu_tensor(name, gpu_tensor)
@@ -2078,8 +2104,7 @@ def _open_gpu_tensor_from_handle(
         if gpu_tensor is not None:
             return gpu_tensor, None
 
-        handle_shm = shared_memory.SharedMemory(name=_gpu_handle_name(name))
-        _unregister(handle_shm)
+        handle_shm = _attach_segment(_gpu_handle_name(name))
         rebuild_fn, rebuild_args = pickle.loads(bytes(handle_shm.buf))
 
         torch.cuda._lazy_init()

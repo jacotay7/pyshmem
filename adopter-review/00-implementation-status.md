@@ -27,6 +27,7 @@ Scope: first remediation batch following the critical adopter review
 | Metadata corruption validation | Done | Open, discovery, and purge validate header/segment length, flags, reserved bytes, stored name, dtype, dimensions, shape, byte-size product, CPU/GPU rules, creator and lock fields, timestamps, unused dimensions, and actual payload segment size before mapping. |
 | Interprocess memory model specified | Done: documented model | `docs/format.rst` now specifies encoding, alignment, the seqlock protocol, what pyshmem relies on (single-writer serialization, aligned 8-byte counter atomicity, program-order publication), what it does *not* provide (no hardware barriers), and the validated architectures (x86-64, aarch64). Platform docs and README narrow correctness claims accordingly. A regression test enforces 8-byte alignment of the hot-path counters. A native acquire/release atomic backend remains the open enforcement piece. |
 | Unlink/recreate lock-inode generation | Done | `_SharedLockState` records the lock file's inode and rebinds a stale handle on each acquire when the pathname resolves to a new inode, so a stream destroyed and recreated while old handles are live reconverges on one shared lock instead of splitting into per-generation locks. Regression tests cover the refresh mechanism and post-recreate convergence (verified load-bearing against a disabled-refresh baseline); `docs/platforms.rst` documents the semantics. |
+| Private resource-tracker API | Done | All segment open/create paths go through `_attach_segment()`, which uses the public `track=False` argument on Python 3.13+ and only falls back to the private `resource_tracker.unregister` on <=3.12. Tests assert the capability probe matches the `SharedMemory` signature and that `_attach_segment` branches correctly (track-false path never unregisters; fallback path does). The pickled CUDA reduction trust boundary is a separate, still-open item. |
 
 ## Verification record
 
@@ -60,8 +61,11 @@ precisely isolating that lifecycle warning remains open.
    Lock-inode generation and stale-handle reconvergence are handled; data and
    metadata segment recreation while consumers hold prior mappings still needs
    explicit documentation and coverage.
-4. Replace or tightly isolate the pickled CUDA reduction trust boundary and
-   private CPython/PyTorch APIs.
+4. Replace or tightly isolate the pickled CUDA reduction trust boundary. The
+   private `resource_tracker` reach-in is now avoided on Python 3.13+ via public
+   `track=False`; the remaining work is the pickle trust boundary (data-only or
+   authenticated CUDA handle schema) and any residual private PyTorch reduction
+   internals.
 5. Expand fault testing: malformed metadata, fork inheritance, CUDA failure
    during publication, repeated writer kills, and prolonged contention stress.
 
