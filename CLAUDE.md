@@ -18,7 +18,7 @@ Each logical stream `name` maps to up to three POSIX shared-memory segments:
 Names are hashed (SHA-1, first 14 chars) to stay under the POSIX segment name limit while remaining collision-resistant. Because the hash is one-way, the original user-visible name is stored verbatim in the metadata segment's name region (UTF-8, null-padded, after the float64 block) so `list_streams()`/the CLI can report the friendly name. `METADATA_TOTAL_BYTES = METADATA_BYTES (256) + METADATA_NAME_MAX (256)`; discovery and purge ignore legacy/unrelated segments whose stored friendly name cannot be validated against the hash.
 
 ### Metadata layout (METADATA_INDEX_* constants)
-The metadata array stores (in order): version, write count, dtype code, ndim, size, gpu_enabled flag, device index, creator PID, write timestamp, write sequence number, lock owner PID, lock depth, cpu_mirror flag, then shape dimensions starting at index 13. `METADATA_SIZE = 32` (float64 slots); the user-visible name lives in the byte region at offset `METADATA_BYTES` (=256).
+New streams use metadata version 3: a fixed 256-byte, little-endian structured header with magic, version/header size, flags, fixed-width dtype/shape/lifecycle fields, aligned uint64 count and int64 write sequence, followed by the 256-byte user-visible name region. `_MetadataView` preserves the existing internal index interface and can also attach to legacy version 2 `float64[32]` metadata. See `docs/format.rst` for exact offsets and compatibility rules. Fixed-width aligned fields prepare for, but do not themselves provide, native acquire/release atomics.
 
 ### Locking model
 - Cross-process: `portalocker` file locks in `/tmp/pyshmem-locks-<uid>/` (or `$PYSHMEM_LOCK_DIR`)

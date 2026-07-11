@@ -28,6 +28,7 @@ New here?  Start with the :doc:`quickstart`.
    overview
    installation
    usage
+   format
    gpu
    cli
    platforms

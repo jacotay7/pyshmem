@@ -17,6 +17,10 @@ Detailed evidence is in [Implementation status](00-implementation-status.md).
 - P1.6: **repository documentation corrected**; hosted docs still need rebuild.
 - Repository hygiene: Python 3.9 CI, complete sdist tests, and obsolete artifact
   removal are **implemented**.
+- P1.2: **format foundation implemented** with a documented v3 magic/header,
+  fixed-width aligned fields, explicit little-endian encoding, feature flags,
+  and v2 attachment compatibility. Strict semantic corruption validation is
+  tracked as the next step.
 
 The original prioritized list below is retained so unfinished portions remain
 visible rather than disappearing when an item is partially completed.

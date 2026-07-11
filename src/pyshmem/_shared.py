@@ -78,7 +78,8 @@ GPU_SUPPORTED_DTYPES: frozenset = frozenset(
     }
 )
 
-METADATA_VERSION = 2
+METADATA_VERSION = 3
+LEGACY_METADATA_VERSION = 2
 METADATA_INDEX_VERSION = 0
 METADATA_INDEX_COUNT = 1
 METADATA_INDEX_DTYPE = 2
@@ -95,6 +96,72 @@ METADATA_INDEX_CPU_MIRROR_ENABLED = 12
 METADATA_INDEX_SHAPE_START = 13
 METADATA_SIZE = 32
 METADATA_BYTES = METADATA_SIZE * np.dtype(np.float64).itemsize
+# Version 3 replaces the float64 metadata block with an explicitly laid-out,
+# little-endian 256-byte header. Frequently updated counters are fixed-width
+# integers and naturally 8-byte aligned. Atomic ordering is a separate concern:
+# NumPy access to these fields is not claimed to provide interprocess atomics.
+METADATA_MAGIC = b"PYSHMEM\x00"
+METADATA_FLAG_GPU_ENABLED = 1 << 0
+METADATA_FLAG_CPU_MIRROR_ENABLED = 1 << 1
+METADATA_V3_DTYPE = np.dtype(
+    {
+        "names": [
+            "magic",
+            "version",
+            "header_size",
+            "flags",
+            "dtype_code",
+            "ndim",
+            "device_index",
+            "creator_pid",
+            "size",
+            "count",
+            "write_sequence",
+            "write_time",
+            "lock_owner_pid",
+            "lock_depth",
+            "reserved",
+            "shape",
+        ],
+        "formats": [
+            "S8",
+            "<u2",
+            "<u2",
+            "<u4",
+            "<u2",
+            "<u2",
+            "<i4",
+            "<i8",
+            "<u8",
+            "<u8",
+            "<i8",
+            "<f8",
+            "<i8",
+            "<u4",
+            "V28",
+            ("<u8", METADATA_SIZE - METADATA_INDEX_SHAPE_START),
+        ],
+        "offsets": [
+            0,
+            8,
+            10,
+            12,
+            16,
+            18,
+            20,
+            24,
+            32,
+            40,
+            48,
+            56,
+            64,
+            72,
+            76,
+            104,
+        ],
+        "itemsize": METADATA_BYTES,
+    }
+)
 # A fixed byte region appended after the float64 metadata block stores the
 # original, user-visible stream name (UTF-8, null-padded).  Segment ids are a
 # one-way SHA-1 hash of the name, so this is the only way list() and the CLI
@@ -123,6 +190,116 @@ class _SharedLockState:
 
 class InconsistentStreamError(RuntimeError):
     """Raised when a writer failed before publishing a complete payload."""
+
+
+class _MetadataView:
+    """Index-compatible view over v2 and v3 metadata layouts."""
+
+    def __init__(self, buffer, *, initialize: bool = False) -> None:
+        if len(buffer) < METADATA_BYTES:
+            raise ValueError(
+                f"metadata segment is too small: expected at least "
+                f"{METADATA_BYTES} bytes, got {len(buffer)}"
+            )
+        if initialize:
+            buffer[:METADATA_BYTES] = b"\x00" * METADATA_BYTES
+            self.layout_version = METADATA_VERSION
+            self._v2 = None
+            self._v3 = np.ndarray((), dtype=METADATA_V3_DTYPE, buffer=buffer)
+            self._v3["magic"] = METADATA_MAGIC
+            self._v3["version"] = METADATA_VERSION
+            self._v3["header_size"] = METADATA_BYTES
+            return
+
+        if bytes(buffer[: len(METADATA_MAGIC)]) == METADATA_MAGIC:
+            self._v2 = None
+            self._v3 = np.ndarray((), dtype=METADATA_V3_DTYPE, buffer=buffer)
+            self.layout_version = int(self._v3["version"])
+            if self.layout_version != METADATA_VERSION:
+                raise ValueError(
+                    f"unsupported pyshmem metadata version: "
+                    f"{self.layout_version}"
+                )
+            if int(self._v3["header_size"]) != METADATA_BYTES:
+                raise ValueError("invalid pyshmem metadata header size")
+            return
+
+        self._v3 = None
+        self._v2 = np.ndarray(
+            (METADATA_SIZE,), dtype=np.float64, buffer=buffer
+        )
+        self.layout_version = int(self._v2[METADATA_INDEX_VERSION])
+        if self.layout_version != LEGACY_METADATA_VERSION:
+            raise ValueError(
+                f"unsupported pyshmem metadata version: {self.layout_version}"
+            )
+
+    def _flags(self) -> int:
+        return int(self._v3["flags"])
+
+    def __getitem__(self, index: int):
+        if self._v2 is not None:
+            return self._v2[index]
+        fields = {
+            METADATA_INDEX_VERSION: "version",
+            METADATA_INDEX_COUNT: "count",
+            METADATA_INDEX_DTYPE: "dtype_code",
+            METADATA_INDEX_NDIM: "ndim",
+            METADATA_INDEX_SIZE: "size",
+            METADATA_INDEX_DEVICE_INDEX: "device_index",
+            METADATA_INDEX_CREATOR_PID: "creator_pid",
+            METADATA_INDEX_WRITE_TIME: "write_time",
+            METADATA_INDEX_WRITE_SEQUENCE: "write_sequence",
+            METADATA_INDEX_LOCK_OWNER_PID: "lock_owner_pid",
+            METADATA_INDEX_LOCK_DEPTH: "lock_depth",
+        }
+        if index == METADATA_INDEX_GPU_ENABLED:
+            return bool(self._flags() & METADATA_FLAG_GPU_ENABLED)
+        if index == METADATA_INDEX_CPU_MIRROR_ENABLED:
+            return bool(self._flags() & METADATA_FLAG_CPU_MIRROR_ENABLED)
+        if index >= METADATA_INDEX_SHAPE_START:
+            return self._v3["shape"][index - METADATA_INDEX_SHAPE_START]
+        try:
+            return self._v3[fields[index]]
+        except KeyError as exc:
+            raise IndexError(index) from exc
+
+    def __setitem__(self, index: int, value) -> None:
+        if self._v2 is not None:
+            self._v2[index] = value
+            return
+        fields = {
+            METADATA_INDEX_VERSION: "version",
+            METADATA_INDEX_COUNT: "count",
+            METADATA_INDEX_DTYPE: "dtype_code",
+            METADATA_INDEX_NDIM: "ndim",
+            METADATA_INDEX_SIZE: "size",
+            METADATA_INDEX_DEVICE_INDEX: "device_index",
+            METADATA_INDEX_CREATOR_PID: "creator_pid",
+            METADATA_INDEX_WRITE_TIME: "write_time",
+            METADATA_INDEX_WRITE_SEQUENCE: "write_sequence",
+            METADATA_INDEX_LOCK_OWNER_PID: "lock_owner_pid",
+            METADATA_INDEX_LOCK_DEPTH: "lock_depth",
+        }
+        if index in (
+            METADATA_INDEX_GPU_ENABLED,
+            METADATA_INDEX_CPU_MIRROR_ENABLED,
+        ):
+            bit = (
+                METADATA_FLAG_GPU_ENABLED
+                if index == METADATA_INDEX_GPU_ENABLED
+                else METADATA_FLAG_CPU_MIRROR_ENABLED
+            )
+            flags = self._flags()
+            self._v3["flags"] = flags | bit if bool(value) else flags & ~bit
+            return
+        if index >= METADATA_INDEX_SHAPE_START:
+            self._v3["shape"][index - METADATA_INDEX_SHAPE_START] = value
+            return
+        try:
+            self._v3[fields[index]] = value
+        except KeyError as exc:
+            raise IndexError(index) from exc
 
 
 def gpu_available() -> bool:
@@ -681,12 +858,11 @@ def _validated_stream_name_for_base(base: str) -> str | None:
     try:
         if len(meta_shm.buf) < METADATA_TOTAL_BYTES:
             return None
-        version = int(
-            np.ndarray(
-                (METADATA_SIZE,), dtype=np.float64, buffer=meta_shm.buf
-            )[METADATA_INDEX_VERSION]
-        )
-        if version != METADATA_VERSION:
+        metadata = _MetadataView(meta_shm.buf)
+        if metadata.layout_version not in (
+            LEGACY_METADATA_VERSION,
+            METADATA_VERSION,
+        ):
             return None
         stream_name = _read_stream_name(meta_shm)
         if stream_name is None or _segment_base_name(stream_name) != base:
@@ -772,9 +948,7 @@ class SharedMemory:
         self._array = np.ndarray(
             self.shape, dtype=self.dtype, buffer=self._data_shm.buf
         )
-        self._metadata = np.ndarray(
-            (METADATA_SIZE,), dtype=np.float64, buffer=self._metadata_shm.buf
-        )
+        self._metadata = _MetadataView(self._metadata_shm.buf)
         self._gpu_tensor = gpu_tensor
         self._torch_dtype = torch_dtype
         self._last_seen_count = int(self._metadata[METADATA_INDEX_COUNT])
@@ -1102,10 +1276,7 @@ class SharedMemory:
                 normalized_shape, dtype=normalized_dtype, buffer=data_shm.buf
             )
             array.fill(0)
-            metadata = np.ndarray(
-                (METADATA_SIZE,), dtype=np.float64, buffer=metadata_shm.buf
-            )
-            metadata.fill(0)
+            metadata = _MetadataView(metadata_shm.buf, initialize=True)
 
             if resolved_gpu is not None:
                 gpu_tensor, gpu_handle_shm = _create_gpu_tensor_and_handle(
@@ -1189,14 +1360,13 @@ class SharedMemory:
         except FileNotFoundError as exc:
             raise _missing_name_error(name) from exc
         _unregister(metadata_shm)
-        metadata = np.ndarray(
-            (METADATA_SIZE,), dtype=np.float64, buffer=metadata_shm.buf
-        )
-        if int(metadata[METADATA_INDEX_VERSION]) != METADATA_VERSION:
+        try:
+            metadata = _MetadataView(metadata_shm.buf)
+        except ValueError as exc:
             metadata_shm.close()
             raise ValueError(
                 f"{name!r} does not contain a supported pyshmem metadata block"
-            )
+            ) from exc
 
         dtype = _code_to_dtype(metadata[METADATA_INDEX_DTYPE])
         ndim = int(metadata[METADATA_INDEX_NDIM])

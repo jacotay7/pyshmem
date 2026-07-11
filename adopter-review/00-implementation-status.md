@@ -23,6 +23,7 @@ Scope: first remediation batch following the critical adopter review
 | Python 3.9 declared but absent from CI | Done | Python 3.9 added to the OS/Python test matrix. |
 | Incomplete sdist tests | Done | `MANIFEST.in` includes `tests/conftest.py`; rebuilt archive contains the fixture and all test modules. |
 | Obsolete former-name distributions | Done | Tracked `dist-release/pyshare-1.0.0*` artifacts removed. |
+| Persistent metadata representation | Done: format foundation | New streams use a documented v3 256-byte little-endian header with magic, feature flags, aligned fixed-width integer counters and dimensions. Readers retain v2 compatibility. Native acquire/release atomics remain open. |
 
 ## Verification record
 
@@ -48,8 +49,9 @@ precisely isolating that lifecycle warning remains open.
 1. Define and enforce the interprocess memory model. Replace `float64` metadata
    counters with fixed-width integers and use acquire/release-capable atomic
    operations or a native synchronization layer.
-2. Specify the persistent shared-memory format: magic, endianness, alignment,
-   feature flags, compatibility rules, and corruption validation.
+2. Complete corruption validation for the documented v3 format. Magic,
+   endianness, alignment, feature flags, and v2 compatibility are implemented;
+   semantic field and segment-geometry validation is the next step.
 3. Resolve unlink/recreate behavior while old handles remain open, including
    lock-inode generation and stale-handle semantics.
 4. Replace or tightly isolate the pickled CUDA reduction trust boundary and

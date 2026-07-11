@@ -619,6 +619,70 @@ def test_metadata_round_trips_user_visible_name(shm_name):
         shm.close()
 
 
+def test_new_stream_uses_fixed_width_v3_metadata(shm_name):
+    shm = pyshmem.create(shm_name, shape=(2, 3), dtype=np.int16)
+    try:
+        raw = shm._metadata_shm.buf
+        assert bytes(raw[:8]) == pyshmem_shared.METADATA_MAGIC
+        assert shm._metadata.layout_version == 3
+        header = np.ndarray(
+            (), dtype=pyshmem_shared.METADATA_V3_DTYPE, buffer=raw
+        )
+        assert header["version"] == 3
+        assert header["header_size"] == pyshmem_shared.METADATA_BYTES
+        assert header.dtype.fields["count"][0] == np.dtype("<u8")
+        assert header.dtype.fields["write_sequence"][0] == np.dtype("<i8")
+        assert header.dtype.fields["shape"][0].base == np.dtype("<u8")
+        assert tuple(header["shape"][:2]) == (2, 3)
+    finally:
+        shm.close()
+
+
+def test_open_accepts_legacy_v2_metadata(shm_name):
+    from multiprocessing import shared_memory
+
+    data = shared_memory.SharedMemory(
+        name=pyshmem_shared._data_name(shm_name), create=True, size=16
+    )
+    meta = shared_memory.SharedMemory(
+        name=pyshmem_shared._metadata_name(shm_name),
+        create=True,
+        size=pyshmem_shared.METADATA_TOTAL_BYTES,
+    )
+    pyshmem_shared._unregister(data)
+    pyshmem_shared._unregister(meta)
+    try:
+        payload = np.ndarray((4,), dtype=np.float32, buffer=data.buf)
+        payload[:] = [1.0, 2.0, 3.0, 4.0]
+        legacy = np.ndarray(
+            (pyshmem_shared.METADATA_SIZE,),
+            dtype=np.float64,
+            buffer=meta.buf,
+        )
+        legacy.fill(0)
+        legacy[pyshmem_shared.METADATA_INDEX_VERSION] = 2
+        legacy[pyshmem_shared.METADATA_INDEX_DTYPE] = (
+            pyshmem_shared._dtype_to_code(np.dtype(np.float32))
+        )
+        legacy[pyshmem_shared.METADATA_INDEX_NDIM] = 1
+        legacy[pyshmem_shared.METADATA_INDEX_SIZE] = 16
+        legacy[pyshmem_shared.METADATA_INDEX_DEVICE_INDEX] = -1
+        legacy[pyshmem_shared.METADATA_INDEX_CPU_MIRROR_ENABLED] = 1
+        legacy[pyshmem_shared.METADATA_INDEX_SHAPE_START] = 4
+        pyshmem_shared._write_stream_name(meta, shm_name)
+
+        opened = pyshmem.open(shm_name)
+        try:
+            assert opened._metadata.layout_version == 2
+            np.testing.assert_array_equal(opened.read(), payload)
+        finally:
+            opened.close()
+    finally:
+        data.close()
+        meta.close()
+        pyshmem.unlink(shm_name)
+
+
 @pytest.mark.cpu
 @pytest.mark.skipif(
     sys.platform in ("win32", "darwin"),
