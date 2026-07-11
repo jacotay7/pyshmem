@@ -817,6 +817,11 @@ def test_open_rejects_metadata_name_mismatch(shm_name):
 def test_open_rejects_data_segment_size_mismatch(shm_name):
     from multiprocessing import shared_memory
 
+    # Declare a large payload but back it with a tiny data segment.  macOS and
+    # Windows round mappings up to a page, so the declared size is chosen large
+    # enough that the physical mapping is undersized on every platform.
+    count = 1_000_000
+    payload_bytes = count * np.dtype(np.float32).itemsize
     data = shared_memory.SharedMemory(
         name=pyshmem_shared._data_name(shm_name), create=True, size=8
     )
@@ -832,14 +837,14 @@ def test_open_rejects_data_segment_size_mismatch(shm_name):
         pyshmem_shared._dtype_to_code(np.dtype(np.float32))
     )
     metadata[pyshmem_shared.METADATA_INDEX_NDIM] = 1
-    metadata[pyshmem_shared.METADATA_INDEX_SIZE] = 16
+    metadata[pyshmem_shared.METADATA_INDEX_SIZE] = payload_bytes
     metadata[pyshmem_shared.METADATA_INDEX_DEVICE_INDEX] = -1
     metadata[pyshmem_shared.METADATA_INDEX_CREATOR_PID] = os.getpid()
     metadata[pyshmem_shared.METADATA_INDEX_CPU_MIRROR_ENABLED] = 1
-    metadata[pyshmem_shared.METADATA_INDEX_SHAPE_START] = 4
+    metadata[pyshmem_shared.METADATA_INDEX_SHAPE_START] = count
     pyshmem_shared._write_stream_name(meta, shm_name)
     try:
-        with pytest.raises(ValueError, match="data segment size"):
+        with pytest.raises(ValueError, match="smaller than its metadata"):
             pyshmem.open(shm_name)
     finally:
         data.close()
@@ -847,6 +852,11 @@ def test_open_rejects_data_segment_size_mismatch(shm_name):
         pyshmem.unlink(shm_name)
 
 
+@pytest.mark.skipif(
+    sys.platform in ("win32", "darwin"),
+    reason="macOS/Windows round shared memory up to a page; a sub-header "
+    "segment cannot be created there",
+)
 def test_open_rejects_truncated_metadata_segment(shm_name):
     from multiprocessing import shared_memory
 

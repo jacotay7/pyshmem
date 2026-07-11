@@ -743,9 +743,13 @@ def _decode_metadata_header(
 ) -> dict[str, Any]:
     """Validate metadata fields and return a normalized stream description."""
     if metadata.layout_version == METADATA_VERSION:
-        if len(metadata_shm.buf) != METADATA_TOTAL_BYTES:
+        # The segment must be *at least* the header + name region.  macOS and
+        # Windows round shared-memory sizes up to a page, so an exact check
+        # would spuriously reject every segment there; a larger mapping is
+        # legitimate and only the leading bytes are used.
+        if len(metadata_shm.buf) < METADATA_TOTAL_BYTES:
             raise ValueError(
-                f"invalid metadata segment size: expected "
+                f"metadata segment too small: expected at least "
                 f"{METADATA_TOTAL_BYTES}, got {len(metadata_shm.buf)}"
             )
         flags = int(metadata._v3["flags"])
@@ -1616,12 +1620,16 @@ class SharedMemory:
         except FileNotFoundError as exc:
             metadata_shm.close()
             raise _missing_name_error(name) from exc
-        if data_shm.size != size:
+        # The data segment must be large enough to hold the declared payload.
+        # macOS and Windows round the mapping up to a page, so require "at
+        # least" rather than an exact match; a corrupt metadata declaring a
+        # payload larger than the physical mapping is still rejected.
+        if data_shm.size < size:
             metadata_shm.close()
             data_shm.close()
             raise ValueError(
-                f"data segment size for {name!r} does not match metadata: "
-                f"expected {size}, got {data_shm.size}"
+                f"data segment for {name!r} is smaller than its metadata "
+                f"declares: need at least {size}, got {data_shm.size}"
             )
 
         resolved_gpu = None
