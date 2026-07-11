@@ -3,6 +3,7 @@
 from pyshmem._shared import (
     GPU_SUPPORTED_DTYPES,
     InconsistentStreamError,
+    StaleStreamError,
     SharedMemory,
     create,
     gpu_available,
@@ -19,6 +20,7 @@ __version__ = "1.0.5"
 __all__ = [
     "GPU_SUPPORTED_DTYPES",
     "InconsistentStreamError",
+    "StaleStreamError",
     "SharedMemory",
     "create",
     "gpu_available",

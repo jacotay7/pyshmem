@@ -168,6 +168,12 @@ with pyshmem.stream("scratch", shape=(256,)) as shm:
 | `unlink()` | Destroy the underlying stream entirely. |
 | `delete()` | Alias for `unlink()`. |
 
+Each created stream has a random `instance_id`. If a name is unlinked and
+recreated while an old handle remains open, that handle stays attached to its
+isolated old POSIX mapping and its `unlink()` raises `StaleStreamError` instead
+of destroying the replacement. The top-level `pyshmem.unlink(name)` is the
+administrative form and intentionally targets the current generation.
+
 ## Feature Examples
 
 ### Zero-allocation reads

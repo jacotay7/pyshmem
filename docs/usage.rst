@@ -361,17 +361,20 @@ released first.
 ``unlink()``
 ~~~~~~~~~~~~
 
-:meth:`~pyshmem.SharedMemory.unlink` destroys the underlying stream
-entirely — all three POSIX segments (data, metadata, GPU handle) and the lock
-file are removed:
+:meth:`~pyshmem.SharedMemory.unlink` destroys the underlying stream's payload,
+metadata, and GPU-handle segments. The small per-name lock file persists so a
+later stream with the same name uses the same lifecycle lock:
 
 .. code-block:: python
 
    shm.unlink()
 
-Any other process that still has the stream open will encounter errors on
-subsequent operations.  :func:`pyshmem.unlink` provides the same operation by
-name, without needing a handle:
+On POSIX, other processes that already mapped the old generation retain an
+isolated mapping until they close it. Their handle cannot unlink a replacement
+created under the same name: it raises
+:class:`~pyshmem.StaleStreamError`. :func:`pyshmem.unlink` provides an
+administrative operation by name and deliberately removes the current
+generation:
 
 .. code-block:: python
 

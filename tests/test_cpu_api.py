@@ -793,10 +793,10 @@ def test_open_rejects_nonzero_reserved_and_unused_shape(shm_name):
         buffer=owner._metadata_shm.buf,
     )
     try:
-        header["reserved"] = b"x" + b"\x00" * 27
+        header["reserved"] = b"x" + b"\x00" * 11
         with pytest.raises(ValueError, match="reserved metadata"):
             pyshmem.open(shm_name)
-        header["reserved"] = b"\x00" * 28
+        header["reserved"] = b"\x00" * 12
         header["shape"][1] = 9
         with pytest.raises(ValueError, match="unused shape"):
             pyshmem.open(shm_name)
@@ -1873,6 +1873,65 @@ def test_acquire_reconverges_after_unlink_recreate(shm_name):
         fresh_handle.close()
         a.close()
         pyshmem.unlink(shm_name)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX lifecycle semantics"
+)
+def test_unlink_recreate_preserves_name_lock_inode(shm_name):
+    original = pyshmem.create(shm_name, shape=(1,), dtype=np.int64)
+    lock_path = original._lock_state.path
+    original_inode = os.stat(lock_path).st_ino
+    original.unlink()
+
+    replacement = pyshmem.create(shm_name, shape=(1,), dtype=np.int64)
+    try:
+        assert os.stat(lock_path).st_ino == original_inode
+        assert replacement._lock_state.inode == original_inode
+    finally:
+        replacement.unlink()
+
+
+def test_recreated_stream_has_new_instance_id(shm_name):
+    original = pyshmem.create(shm_name, shape=(1,), dtype=np.int64)
+    original_id = original.instance_id
+    assert original_id is not None
+    assert len(original_id) == 32
+    original.unlink()
+
+    replacement = pyshmem.create(shm_name, shape=(1,), dtype=np.int64)
+    try:
+        assert replacement.instance_id is not None
+        assert replacement.instance_id != original_id
+    finally:
+        replacement.unlink()
+
+
+def test_stale_handle_cannot_unlink_replacement(shm_name):
+    original = pyshmem.create(shm_name, shape=(1,), dtype=np.int64)
+    stale = pyshmem.open(shm_name)
+    original.write(np.array([11], dtype=np.int64))
+
+    pyshmem.unlink(shm_name)
+    replacement = pyshmem.create(shm_name, shape=(1,), dtype=np.int64)
+    replacement.write(np.array([22], dtype=np.int64))
+    try:
+        # POSIX keeps the old mapping alive and isolated from the new stream.
+        np.testing.assert_array_equal(stale.read(), np.array([11]))
+        stale.write(np.array([33], dtype=np.int64))
+        np.testing.assert_array_equal(replacement.read(), np.array([22]))
+
+        with pytest.raises(pyshmem.StaleStreamError, match="newer generation"):
+            stale.unlink()
+
+        current = pyshmem.open(shm_name)
+        try:
+            np.testing.assert_array_equal(current.read(), np.array([22]))
+        finally:
+            current.close()
+    finally:
+        stale.close()
+        replacement.unlink()
 
 
 @pytest.mark.skipif(

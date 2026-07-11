@@ -27,6 +27,7 @@ Scope: first remediation batch following the critical adopter review
 | Metadata corruption validation | Done | Open, discovery, and purge validate header/segment length, flags, reserved bytes, stored name, dtype, dimensions, shape, byte-size product, CPU/GPU rules, creator and lock fields, timestamps, unused dimensions, and actual payload segment size before mapping. |
 | Interprocess memory model specified | Done: documented model | `docs/format.rst` now specifies encoding, alignment, the seqlock protocol, what pyshmem relies on (single-writer serialization, aligned 8-byte counter atomicity, program-order publication), what it does *not* provide (no hardware barriers), and the validated architectures (x86-64, aarch64). Platform docs and README narrow correctness claims accordingly. A regression test enforces 8-byte alignment of the hot-path counters. A native acquire/release atomic backend remains the open enforcement piece. |
 | Unlink/recreate lock-inode generation | Done | `_SharedLockState` records the lock file's inode and rebinds a stale handle on each acquire when the pathname resolves to a new inode, so a stream destroyed and recreated while old handles are live reconverges on one shared lock instead of splitting into per-generation locks. Regression tests cover the refresh mechanism and post-recreate convergence (verified load-bearing against a disabled-refresh baseline); `docs/platforms.rst` documents the semantics. |
+| Unlink/recreate generation safety | Done | New streams carry a random 128-bit instance id. Create and unlink serialize on a persistent per-name lock inode; handle-level unlink rejects a newer replacement with `StaleStreamError`. Tests cover stable lock identity, changing generation ids, old-mapping isolation, and replacement survival. |
 | Private resource-tracker API | Done | All segment open/create paths go through `_attach_segment()`, which uses the public `track=False` argument on Python 3.13+ and only falls back to the private `resource_tracker.unregister` on <=3.12. Tests assert the capability probe matches the `SharedMemory` signature and that `_attach_segment` branches correctly (track-false path never unregisters; fallback path does). The pickled CUDA reduction trust boundary is a separate, still-open item. |
 | Fault testing: metadata/kills/contention | Done (CPU scope) | Added CPU regression tests for a truncated metadata segment (clean rejection), repeated writer kills each recovering to `InconsistentStreamError` then repairing, and concurrent multi-writer/reader contention proving no torn seqlock snapshots and no deadlock (stable across 10 repeats). |
 | Fault testing: CUDA failure during publication | Done | GPU regression test injects a CUDA error at publication-time synchronize and asserts the write path's `_abort_write` leaves the stream invalid (`InconsistentStreamError` on read) and that a later good write repairs it. Validated on an RTX 5090. |
@@ -61,17 +62,13 @@ precisely isolating that lifecycle warning remains open.
 2. Extend format validation only when new fields/features are introduced. The
    current v3 semantic fields and segment geometry are validated; checksums or
    authenticated metadata remain optional future hardening.
-3. Resolve remaining unlink/recreate edge cases while old handles remain open.
-   Lock-inode generation and stale-handle reconvergence are handled; data and
-   metadata segment recreation while consumers hold prior mappings still needs
-   explicit documentation and coverage.
-4. Residual private PyTorch reduction internals. The pickle trust boundary is
+3. Residual private PyTorch reduction internals. The pickle trust boundary is
    now closed with an authenticating restricted unpickler, and the private
    `resource_tracker` reach-in is avoided on Python 3.13+ via public
    `track=False`. What remains is that reconstruction still depends on torch's
    private `rebuild_cuda_tensor`/`_lazy_init` internals, which carry no stable
    API guarantee across torch versions.
-5. Fault testing is now covered: malformed/truncated metadata, repeated writer
+4. Fault testing is now covered: malformed/truncated metadata, repeated writer
    kills, multi-writer contention, CUDA-failure-during-publication, and
    fork-state inheritance all have regression tests. Prolonged multi-host or
    many-hour soak stress could still be added but is not a correctness gap.

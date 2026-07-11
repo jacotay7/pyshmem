@@ -26,6 +26,7 @@ import io
 import math
 import os
 import platform
+import secrets
 import pickle
 import tempfile
 import threading
@@ -109,6 +110,7 @@ METADATA_BYTES = METADATA_SIZE * np.dtype(np.float64).itemsize
 METADATA_MAGIC = b"PYSHMEM\x00"
 METADATA_FLAG_GPU_ENABLED = 1 << 0
 METADATA_FLAG_CPU_MIRROR_ENABLED = 1 << 1
+METADATA_FLAG_INSTANCE_ID = 1 << 2
 METADATA_V3_DTYPE = np.dtype(
     {
         "names": [
@@ -126,6 +128,7 @@ METADATA_V3_DTYPE = np.dtype(
             "write_time",
             "lock_owner_pid",
             "lock_depth",
+            "instance_id",
             "reserved",
             "shape",
         ],
@@ -144,7 +147,8 @@ METADATA_V3_DTYPE = np.dtype(
             "<f8",
             "<i8",
             "<u4",
-            "V28",
+            "S16",
+            "V12",
             ("<u8", METADATA_SIZE - METADATA_INDEX_SHAPE_START),
         ],
         "offsets": [
@@ -163,6 +167,7 @@ METADATA_V3_DTYPE = np.dtype(
             64,
             72,
             76,
+            92,
             104,
         ],
         "itemsize": METADATA_BYTES,
@@ -269,6 +274,10 @@ class InconsistentStreamError(RuntimeError):
     """Raised when a writer failed before publishing a complete payload."""
 
 
+class StaleStreamError(RuntimeError):
+    """Raised when a handle targets an older generation of a stream name."""
+
+
 class _MetadataView:
     """Index-compatible view over v2 and v3 metadata layouts."""
 
@@ -313,6 +322,19 @@ class _MetadataView:
 
     def _flags(self) -> int:
         return int(self._v3["flags"])
+
+    def instance_id(self) -> bytes | None:
+        if self._v3 is None:
+            return None
+        if not (self._flags() & METADATA_FLAG_INSTANCE_ID):
+            return None
+        return bytes(self._v3["instance_id"])
+
+    def set_instance_id(self, value: bytes) -> None:
+        if self._v3 is None or len(value) != 16:
+            raise ValueError("instance_id requires a version 3 16-byte value")
+        self._v3["instance_id"] = value
+        self._v3["flags"] = self._flags() | METADATA_FLAG_INSTANCE_ID
 
     @property
     def native_atomics(self) -> bool:
@@ -852,12 +874,22 @@ def _decode_metadata_header(
             )
         flags = int(metadata._v3["flags"])
         known_flags = (
-            METADATA_FLAG_GPU_ENABLED | METADATA_FLAG_CPU_MIRROR_ENABLED
+            METADATA_FLAG_GPU_ENABLED
+            | METADATA_FLAG_CPU_MIRROR_ENABLED
+            | METADATA_FLAG_INSTANCE_ID
         )
         if flags & ~known_flags:
             raise ValueError(f"unsupported metadata flags: 0x{flags:x}")
         if any(bytes(metadata._v3["reserved"])):
             raise ValueError("reserved metadata bytes must be zero")
+        instance_id = metadata.instance_id()
+        if flags & METADATA_FLAG_INSTANCE_ID:
+            if instance_id is None or instance_id == b"\x00" * 16:
+                raise ValueError("instance_id metadata cannot be zero")
+        elif bytes(metadata._v3["instance_id"]) != b"\x00" * 16:
+            raise ValueError("instance_id requires its metadata feature flag")
+    else:
+        instance_id = None
 
     stored_name = _read_stream_name(metadata_shm)
     if metadata.layout_version == METADATA_VERSION and stored_name is None:
@@ -948,6 +980,7 @@ def _decode_metadata_header(
         "device_index": device_index,
         "creator_pid": creator_pid,
         "cpu_mirror": cpu_mirror,
+        "instance_id": instance_id,
     }
 
 
@@ -1087,38 +1120,14 @@ def purge(*, include_cuda_orphans: bool = False) -> list[str]:
         if stream_name is not None:
             validated.append((base, stream_name))
 
-    segment_names = set()
-    for base, _ in validated:
-        for candidate in (base, f"{base}_meta", f"{base}_gpu"):
-            if os.path.exists(os.path.join(shm_dir, candidate)):
-                segment_names.add(candidate)
-    if _can_directly_unlink_posix_segments():
-        for segment_name in sorted(segment_names):
-            _safe_posix_shm_unlink(segment_name)
-    else:
-        for segment_name in sorted(segment_names):
-            shm = _open_existing_segment(segment_name)
-            if shm is not None:
-                try:
-                    shm.unlink()
-                except FileNotFoundError:
-                    pass
-                finally:
-                    try:
-                        shm.close()
-                    except Exception:
-                        pass
-    uid = getattr(os, "getuid", lambda: 0)()
-    lock_dir = os.environ.get("PYSHMEM_LOCK_DIR") or os.path.join(
-        tempfile.gettempdir(), f"pyshmem-locks-{uid}"
-    )
-    for base, stream_name in validated:
-        _safe_remove(os.path.join(lock_dir, f"{base}.lock"))
-        _LOCAL_GPU_TENSORS.pop(stream_name, None)
+    removed = []
+    for _, stream_name in validated:
+        unlink(stream_name)
+        removed.append(stream_name)
     _collect_cuda_ipc()
     if include_cuda_orphans:
         _remove_orphaned_cuda_ipc_files()
-    return sorted(stream_name for _, stream_name in validated)
+    return sorted(removed)
 
 
 def unlink_quiet(name: str) -> None:
@@ -1132,8 +1141,35 @@ def unlink_quiet(name: str) -> None:
     unlink(name)
 
 
-def unlink(name: str) -> None:
-    _LOCAL_GPU_TENSORS.pop(name, None)
+@contextmanager
+def _locked_stream_name(name: str):
+    """Serialize name lifecycle operations without mutating stream metadata."""
+    state = _lock_state(name)
+    state.thread_lock.acquire()
+    file_locked = False
+    try:
+        state.refresh_if_stale()
+        _acquire_file_lock(state.file_handle, timeout=None, poll_interval=1e-3)
+        file_locked = True
+        yield
+    finally:
+        if file_locked:
+            _release_file_lock(state.file_handle)
+        state.thread_lock.release()
+        _release_lock_state(state)
+
+
+def _current_instance_id(name: str) -> bytes | None:
+    metadata_shm = _open_existing_segment(_metadata_name(name))
+    if metadata_shm is None:
+        return None
+    try:
+        return _MetadataView(metadata_shm.buf).instance_id()
+    finally:
+        metadata_shm.close()
+
+
+def _unlink_segments_unlocked(name: str) -> None:
     if _can_directly_unlink_posix_segments():
         for segment_name in (
             _data_name(name),
@@ -1141,7 +1177,6 @@ def unlink(name: str) -> None:
             _gpu_handle_name(name),
         ):
             _safe_posix_shm_unlink(segment_name)
-        _safe_remove(_lock_path(name))
         return
     for segment_name in (
         _data_name(name),
@@ -1160,7 +1195,27 @@ def unlink(name: str) -> None:
                 shm.close()
             except Exception:
                 pass
-    _safe_remove(_lock_path(name))
+
+
+def unlink(name: str, *, _expected_instance_id: bytes | None = None) -> None:
+    """Destroy the current generation of a named stream.
+
+    Handle-level calls pass their private generation id so an old handle cannot
+    unlink a replacement stream created under the same user-visible name.
+    Top-level calls intentionally target whichever generation is current.
+    """
+    with _locked_stream_name(name):
+        current_instance_id = _current_instance_id(name)
+        if (
+            _expected_instance_id is not None
+            and current_instance_id is not None
+            and current_instance_id != _expected_instance_id
+        ):
+            raise StaleStreamError(
+                f"stream {name!r} has been replaced by a newer generation"
+            )
+        _LOCAL_GPU_TENSORS.pop(name, None)
+        _unlink_segments_unlocked(name)
 
 
 def _stream_name_for_base(base: str) -> str | None:
@@ -1261,6 +1316,7 @@ class SharedMemory:
         data_shm: shared_memory.SharedMemory,
         metadata_shm: shared_memory.SharedMemory,
         owner: bool,
+        instance_id: bytes | None = None,
         gpu_handle_shm: shared_memory.SharedMemory | None = None,
         gpu_tensor=None,
         torch_dtype=None,
@@ -1273,6 +1329,7 @@ class SharedMemory:
         self.gpu_enabled = bool(gpu_enabled)
         self.cpu_mirror = bool(cpu_mirror)
         self.owner = bool(owner)
+        self._instance_id = instance_id
         self._data_shm = data_shm
         self._metadata_shm = metadata_shm
         self._gpu_handle_shm = gpu_handle_shm
@@ -1287,6 +1344,11 @@ class SharedMemory:
         self._lock_state_released = False
         self._closed = False
         self._auto_unlink = False
+
+    @property
+    def instance_id(self) -> str | None:
+        """Return the stream generation's hex identifier, if present."""
+        return None if self._instance_id is None else self._instance_id.hex()
 
     def __repr__(self) -> str:
         dtype_name = str(self.dtype)
@@ -1696,6 +1758,8 @@ class SharedMemory:
             )
             array.fill(0)
             metadata = _MetadataView(metadata_shm.buf, initialize=True)
+            instance_id = secrets.token_bytes(16)
+            metadata.set_instance_id(instance_id)
 
             if resolved_gpu is not None:
                 gpu_tensor, gpu_handle_shm = _create_gpu_tensor_and_handle(
@@ -1760,6 +1824,7 @@ class SharedMemory:
             data_shm=data_shm,
             metadata_shm=metadata_shm,
             owner=True,
+            instance_id=instance_id,
             gpu_handle_shm=gpu_handle_shm,
             gpu_tensor=gpu_tensor,
             torch_dtype=torch_dtype,
@@ -1874,6 +1939,7 @@ class SharedMemory:
             data_shm=data_shm,
             metadata_shm=metadata_shm,
             owner=False,
+            instance_id=decoded["instance_id"],
             gpu_handle_shm=gpu_handle_shm,
             gpu_tensor=gpu_tensor,
             torch_dtype=torch_dtype,
@@ -1928,7 +1994,7 @@ class SharedMemory:
         # then prompt torch to reclaim any IPC blocks whose consumers have
         # released them.
         self._gpu_tensor = None
-        unlink(self.name)
+        unlink(self.name, _expected_instance_id=self._instance_id)
         if had_gpu_tensor:
             _collect_cuda_ipc()
 
@@ -2471,14 +2537,17 @@ def create(
         instead of :meth:`~SharedMemory.close` on ``__exit__``.  See also the
         :func:`stream` helper which sets this flag automatically.
     """
-    shm = SharedMemory._create(
-        name,
-        shape=shape,
-        dtype=dtype,
-        size=size,
-        gpu_device=gpu_device,
-        cpu_mirror=cpu_mirror,
-    )
+    # Keep the name lock inode stable across generations and serialize the
+    # metadata/data replacement with handle-level unlink checks.
+    with _locked_stream_name(name):
+        shm = SharedMemory._create(
+            name,
+            shape=shape,
+            dtype=dtype,
+            size=size,
+            gpu_device=gpu_device,
+            cpu_mirror=cpu_mirror,
+        )
     shm._auto_unlink = auto_unlink
     return shm
 

@@ -176,7 +176,8 @@ private `rebuild_cuda_tensor` internals.
   a recreated pathname refer to a different lock object. **Resolved for the lock
   file:** `_SharedLockState` records the lock inode and rebinds a stale handle
   on each acquire when the pathname resolves to a new inode, so an
-  unlink/recreate cycle reconverges on one shared lock. Regression tests cover
-  the refresh mechanism and post-recreate convergence, and `docs/platforms.rst`
-  documents the semantics. Recreating the data/metadata segments while consumers
-  hold prior mappings still needs explicit lifecycle documentation and tests.
+  unlink/recreate cycle reconverges on one shared lock. New streams retain that
+  per-name lock inode and carry a random instance id; stale handle-level unlink
+  raises `StaleStreamError` instead of deleting a replacement. Regression tests
+  and `docs/platforms.rst` cover old data/metadata mapping isolation, stable
+  lock identity, and recreation behavior.

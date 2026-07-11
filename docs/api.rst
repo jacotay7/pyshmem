@@ -14,6 +14,8 @@ Top-level functions and constants
 
 .. autofunction:: pyshmem.unlink_quiet
 
+.. autoexception:: pyshmem.StaleStreamError
+
 .. autofunction:: pyshmem.purge
 
 .. autofunction:: pyshmem.stream

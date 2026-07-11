@@ -35,7 +35,7 @@ updated counters are aligned to eight-byte boundaries.
    * - flags
      - 12
      - uint32
-     - GPU and CPU-mirror feature bits
+     - GPU, CPU-mirror, and instance-id feature bits
    * - dtype_code
      - 16
      - uint16
@@ -76,9 +76,13 @@ updated counters are aligned to eight-byte boundaries.
      - 72
      - uint32
      - Diagnostic re-entrant lock depth
-   * - reserved
+   * - instance_id
      - 76
-     - 28 bytes
+     - 16 bytes
+     - Random identity for this name generation
+   * - reserved
+     - 92
+     - 12 bytes
      - Must be zero; reserved for extensions
    * - shape
      - 104
@@ -106,6 +110,12 @@ state, and that the data segment is large enough for the declared payload.
 Segment-length checks require a sufficient (not exact) mapping because macOS
 rounds shared-memory allocations up to a page. Discovery and purge apply the
 same header validation and ignore candidates that fail it.
+
+The random ``instance_id`` distinguishes successive streams created under the
+same user-visible name. Handle-level unlink verifies this identity while
+holding the persistent per-name lifecycle lock, so an old handle cannot destroy
+a newer replacement. Version 2 streams and early version 3 streams without the
+feature flag remain readable, but cannot receive this generation protection.
 
 Memory ordering
 ---------------
