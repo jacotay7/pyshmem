@@ -163,8 +163,14 @@ useful in tight real-time loops:
        shm.read(out=buf)   # writes into buf; no new array is allocated
        process(buf)
 
-``out`` is accepted for CPU streams only.  It is silently ignored for GPU
-streams.
+``out`` is accepted for safe CPU reads only. GPU and unsafe reads reject it
+with :class:`ValueError` rather than silently allocating another result.
+
+Safe reads also accept ``timeout=`` to bound how long they wait for an active
+writer. If a payload copy fails, or a writer process exits after beginning a
+write, readers raise :class:`pyshmem.InconsistentStreamError` instead of
+polling forever. A subsequent successful full write replaces the incomplete
+payload and makes the stream readable again.
 
 Waiting for a new write
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -279,9 +285,9 @@ returns an empty list on other platforms.
    Segment names are stored internally as SHA-1 hashes (``ps_<hash>``) to stay
    under the POSIX name-length limit, but the original name passed to
    :func:`~pyshmem.create` is recorded in each stream's metadata, so
-   ``list_streams()`` reports the friendly name.  Streams created by very old
-   pyshmem versions that did not record the name fall back to their hashed
-   ``ps_<hash>`` identifier.
+   ``list_streams()`` reports the friendly name. Legacy or unrelated segments
+   that do not contain a name which validates against the hash are omitted;
+   this prevents discovery and purge from claiming arbitrary ``ps_*`` objects.
 
 The same listing is available from the shell with ``pyshmem list`` — see
 :doc:`cli`.

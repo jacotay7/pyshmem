@@ -67,6 +67,14 @@ def _crash_while_holding_lock(name: str, event) -> None:
     os._exit(0)
 
 
+def _crash_during_write(name: str, event) -> None:
+    shm = pyshmem.open(name)
+    shm.acquire(timeout=1.0)
+    shm._mark_write_started()
+    event.set()
+    os._exit(0)
+
+
 def _create_write_and_exit(name: str, event) -> None:
     shm = pyshmem.create(name, shape=(2, 2), dtype=np.float32)
     shm.write(np.full((2, 2), 7.0, dtype=np.float32))
@@ -694,7 +702,7 @@ def _dead_pid():
     sys.platform in ("win32", "darwin"),
     reason="purge sweeps /dev/shm (Linux only)",
 )
-def test_purge_removes_orphaned_cuda_ipc_files():
+def test_purge_only_removes_cuda_orphans_when_explicitly_requested():
     # A torch CUDA IPC ref-count file left behind by a dead producer.  The
     # filename encodes the producer PID in hex: cuda.shm.<id>.<pid>.<seq>.
     # Use a distinctive <id> so we never clobber a real torch ref-count file.
@@ -705,7 +713,36 @@ def test_purge_removes_orphaned_cuda_ipc_files():
 
     pyshmem.purge()
 
+    assert os.path.exists(fake)
+
+    pyshmem.purge(include_cuda_orphans=True)
+
     assert not os.path.exists(fake)
+
+
+@pytest.mark.cpu
+@pytest.mark.skipif(
+    sys.platform in ("win32", "darwin"),
+    reason="purge sweeps /dev/shm (Linux only)",
+)
+def test_purge_preserves_unvalidated_ps_prefixed_segments():
+    from multiprocessing import shared_memory
+
+    name = "ps_0123456789abcd"
+    segment = shared_memory.SharedMemory(name=name, create=True, size=8)
+    pyshmem_shared._unregister(segment)
+    segment.close()
+    try:
+        pyshmem.purge()
+        reopened = shared_memory.SharedMemory(name=name)
+        reopened.close()
+    finally:
+        try:
+            cleanup = shared_memory.SharedMemory(name=name)
+            cleanup.unlink()
+            cleanup.close()
+        except FileNotFoundError:
+            pass
 
 
 @pytest.mark.cpu
@@ -1231,6 +1268,21 @@ def test_cli_no_command_exits_nonzero(capsys):
     assert exit_code == 1
 
 
+def test_cli_purge_cuda_orphans_requires_explicit_flag(monkeypatch):
+    import pyshmem._cli as cli
+
+    calls = []
+
+    def fake_purge(*, include_cuda_orphans=False):
+        calls.append(include_cuda_orphans)
+        return []
+
+    monkeypatch.setattr(pyshmem, "purge", fake_purge)
+    assert cli.main(["purge"]) == 0
+    assert cli.main(["purge", "--include-cuda-orphans"]) == 0
+    assert calls == [False, True]
+
+
 def test_read_new_writes_into_preallocated_out_buffer(shm_name):
     shm = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
     try:
@@ -1275,3 +1327,98 @@ def test_read_new_async_forwards_out_buffer(shm_name):
         assert np.array_equal(buffer, [5.0, 6.0])
     finally:
         shm.close()
+
+
+def test_failed_write_is_invalid_until_replaced(shm_name, monkeypatch):
+    shm = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
+    original_copyto = pyshmem_shared.np.copyto
+
+    def fail_copy(*args, **kwargs):
+        raise RuntimeError("injected copy failure")
+
+    monkeypatch.setattr(pyshmem_shared.np, "copyto", fail_copy)
+    with pytest.raises(RuntimeError, match="injected copy failure"):
+        shm.write(np.ones(4, dtype=np.float32))
+    monkeypatch.setattr(pyshmem_shared.np, "copyto", original_copyto)
+
+    assert shm.write_sequence < 0
+    with pytest.raises(pyshmem.InconsistentStreamError):
+        shm.read()
+
+    replacement = np.arange(4, dtype=np.float32)
+    shm.write(replacement)
+    assert shm.write_sequence > 0 and shm.write_sequence % 2 == 0
+    np.testing.assert_array_equal(shm.read(), replacement)
+    shm.close()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="crash recovery relies on POSIX process-shared locks",
+)
+def test_reader_detects_writer_process_crash_mid_write(shm_name):
+    shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    context = mp.get_context("spawn")
+    event = context.Event()
+    process = context.Process(
+        target=_crash_during_write, args=(shm_name, event)
+    )
+    process.start()
+    assert event.wait(timeout=5)
+    process.join(timeout=20)
+    assert process.exitcode == 0
+
+    with pytest.raises(pyshmem.InconsistentStreamError, match="exited"):
+        shm.read(timeout=1.0)
+
+    shm.write(np.array([8.0, 9.0], dtype=np.float32))
+    np.testing.assert_array_equal(shm.read(), [8.0, 9.0])
+    shm.close()
+
+
+def test_read_timeout_bounds_in_progress_write(shm_name):
+    shm = pyshmem.create(shm_name, shape=(1,), dtype=np.float32)
+    shm._mark_write_started()
+    start = time.monotonic()
+    with pytest.raises(TimeoutError, match="stable write"):
+        shm.read(timeout=0.05)
+    assert time.monotonic() - start < 0.25
+    shm._abort_write()
+    shm.close()
+
+
+def test_lock_timeout_includes_same_process_thread_wait(shm_name):
+    shm = pyshmem.create(shm_name, shape=(1,), dtype=np.float32)
+    ready = threading.Event()
+
+    def hold_lock():
+        with shm.locked():
+            ready.set()
+            time.sleep(0.3)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert ready.wait(timeout=1)
+    start = time.monotonic()
+    with pytest.raises(TimeoutError):
+        shm.acquire(timeout=0.05)
+    elapsed = time.monotonic() - start
+    holder.join()
+    assert elapsed < 0.2
+    shm.close()
+
+
+def test_last_close_releases_per_name_lock_file_descriptor(shm_name):
+    first = pyshmem.create(shm_name, shape=(1,), dtype=np.float32)
+    second = pyshmem.open(shm_name)
+    state = first._lock_state
+    assert state.reference_count == 2
+
+    first.close()
+    assert state.reference_count == 1
+    assert not state.file_handle.closed
+    second.close()
+
+    assert state.reference_count == 0
+    assert state.file_handle.closed
+    assert state.path not in pyshmem_shared._THREAD_LOCKS

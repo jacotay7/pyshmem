@@ -1035,3 +1035,39 @@ def test_purge_preserves_cuda_ipc_files_of_live_stream(shm_name):
         assert torch.allclose(owner.read(), torch.ones(16, device="cuda:0"))
     finally:
         owner.unlink()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_safe_read_waits_for_even_write_sequence(shm_name):
+    shm = pyshmem.create(
+        shm_name, shape=(4,), dtype=np.float32, gpu_device="cuda:0"
+    )
+    shm.write(torch.zeros(4, device="cuda:0"))
+    shm._mark_write_started()
+
+    def finish_write():
+        time.sleep(0.05)
+        shm._gpu_tensor.copy_(torch.arange(4, device="cuda:0"))
+        torch.cuda.synchronize()
+        shm._finish_write()
+
+    writer = threading.Thread(target=finish_write)
+    writer.start()
+    start = time.monotonic()
+    result = shm.read(timeout=1.0)
+    elapsed = time.monotonic() - start
+    writer.join()
+
+    assert elapsed >= 0.04
+    assert torch.equal(result.cpu(), torch.arange(4, dtype=torch.float32))
+    shm.close()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_read_rejects_cpu_out_buffer(shm_name):
+    shm = pyshmem.create(
+        shm_name, shape=(4,), dtype=np.float32, gpu_device="cuda:0"
+    )
+    with pytest.raises(ValueError, match="safe CPU reads"):
+        shm.read(out=np.empty(4, dtype=np.float32))
+    shm.close()

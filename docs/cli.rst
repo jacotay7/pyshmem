@@ -49,10 +49,9 @@ that still has the stream open will encounter errors on subsequent operations.
 ``pyshmem purge``
 -----------------
 
-Remove **all** pyshmem segments from the machine in one shot.  In addition to
-the ``ps_*`` data/metadata/handle segments and their lock files, ``purge`` also
-sweeps orphaned torch CUDA IPC reference-count files (``cuda.shm.*``) left
-behind by GPU producers that exited without releasing their tensors:
+Remove every **validated** pyshmem stream in one shot. A candidate is removed
+only when its stored user-visible name hashes back to its exact ``ps_*`` segment
+identifier, so unrelated objects that happen to use the prefix are preserved:
 
 .. code-block:: bash
 
@@ -61,10 +60,16 @@ behind by GPU producers that exited without releasing their tensors:
    # purged 'my_gpu_stream'
    # removed 2 stream(s)
 
-``purge`` only deletes ``cuda.shm.*`` files whose producer PID is no longer
-alive, so it is safe to run while other GPU streams are in use — it will not
-corrupt a live process's CUDA tensors.  It is the CLI equivalent of
-:func:`pyshmem.purge`.
+Ordinary purge does not touch PyTorch's process-global ``cuda.shm.*`` namespace.
+To also remove files whose encoded producer PID is no longer alive, opt in:
+
+.. code-block:: bash
+
+   pyshmem purge --include-cuda-orphans
+
+This broader cleanup can remove orphaned files created by non-pyshmem PyTorch
+applications running under the same OS account. It is the CLI equivalent of
+``pyshmem.purge(include_cuda_orphans=True)``.
 
 .. warning::
 

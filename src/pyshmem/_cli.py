@@ -32,9 +32,17 @@ def main(argv=None) -> int:
         help="List the user-visible names of all existing pyshmem streams.",
     )
 
-    sub.add_parser(
+    purge_p = sub.add_parser(
         "purge",
         help="Remove ALL pyshmem segments from shared memory.",
+    )
+    purge_p.add_argument(
+        "--include-cuda-orphans",
+        action="store_true",
+        help=(
+            "also remove dead-producer cuda.shm.* files from any PyTorch "
+            "application owned by this OS account"
+        ),
     )
 
     args = parser.parse_args(argv)
@@ -61,7 +69,7 @@ def main(argv=None) -> int:
     if args.command == "purge":
         import pyshmem
 
-        removed = pyshmem.purge()
+        removed = pyshmem.purge(include_cuda_orphans=args.include_cuda_orphans)
         if removed:
             for name in removed:
                 print(f"purged {name!r}")

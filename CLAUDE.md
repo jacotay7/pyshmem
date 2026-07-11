@@ -15,7 +15,7 @@ Each logical stream `name` maps to up to three POSIX shared-memory segments:
 - **metadata segment** — a `float64[32]` array followed by a 256-byte name region (`ps_<sha1hash>_meta`)
 - **GPU handle segment** — torch `reduce_tensor()` payload (`(rebuild_fn, args)`, pickled) for cross-process GPU tensor reconstruction (`ps_<sha1hash>_gpu`)
 
-Names are hashed (SHA-1, first 14 chars) to stay under the POSIX segment name limit while remaining collision-resistant. Because the hash is one-way, the original user-visible name is stored verbatim in the metadata segment's name region (UTF-8, null-padded, after the float64 block) so `list_streams()`/the CLI can report the friendly name. `METADATA_TOTAL_BYTES = METADATA_BYTES (256) + METADATA_NAME_MAX (256)`; readers tolerate legacy 256-byte segments by falling back to the hashed id.
+Names are hashed (SHA-1, first 14 chars) to stay under the POSIX segment name limit while remaining collision-resistant. Because the hash is one-way, the original user-visible name is stored verbatim in the metadata segment's name region (UTF-8, null-padded, after the float64 block) so `list_streams()`/the CLI can report the friendly name. `METADATA_TOTAL_BYTES = METADATA_BYTES (256) + METADATA_NAME_MAX (256)`; discovery and purge ignore legacy/unrelated segments whose stored friendly name cannot be validated against the hash.
 
 ### Metadata layout (METADATA_INDEX_* constants)
 The metadata array stores (in order): version, write count, dtype code, ndim, size, gpu_enabled flag, device index, creator PID, write timestamp, write sequence number, lock owner PID, lock depth, cpu_mirror flag, then shape dimensions starting at index 13. `METADATA_SIZE = 32` (float64 slots); the user-visible name lives in the byte region at offset `METADATA_BYTES` (=256).
@@ -42,7 +42,7 @@ GPU-memory lifecycle rules (see `SharedMemory.close`/`unlink`):
 - The **owner** keeps its tensor on `close()` (so the stream stays mappable/reopenable in-process) and only releases it on `unlink()`, which also calls `torch.cuda.ipc_collect()`.
 - A per-process weakref cache (`_LOCAL_GPU_TENSORS`) avoids re-importing handles within the creator process.
 
-`purge()` additionally sweeps orphaned `cuda.shm.*` ref-count files left by **dead** producers — it parses the producer PID from the filename (`cuda.shm.<id>.<pid_hex>.<seq>`) and only removes files whose PID is no longer alive, so it never corrupts a live process's CUDA tensors.
+`purge()` removes only segments whose stored name validates against their exact pyshmem hash. Global orphaned `cuda.shm.*` cleanup is opt-in with `purge(include_cuda_orphans=True)` / `pyshmem purge --include-cuda-orphans`, because that namespace is shared by all PyTorch applications under the OS account.
 
 ## Public API
 
@@ -103,6 +103,7 @@ pyshmem.unlink("my_stream")
 | Name | Description |
 |------|-------------|
 | `GPU_SUPPORTED_DTYPES` | `frozenset` of NumPy dtypes that can be used with `gpu_device=` |
+| `InconsistentStreamError` | Raised when a writer failed or exited before publishing a complete payload |
 
 ## CLI
 
@@ -110,7 +111,8 @@ pyshmem.unlink("my_stream")
 pyshmem list                     # list user-visible names of all streams
 pyshmem unlink my_stream         # destroy a stream by user-visible name
 pyshmem unlink stream_a stream_b # destroy multiple streams
-pyshmem purge                    # remove ALL pyshmem segments + orphaned cuda.shm.* files
+pyshmem purge                    # remove all validated pyshmem segments
+pyshmem purge --include-cuda-orphans  # additionally sweep global dead-producer CUDA IPC files
 ```
 
 ## Key Implementation Details

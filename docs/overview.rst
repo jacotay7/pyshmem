@@ -48,8 +48,8 @@ The public package surface is intentionally small:
 - :func:`pyshmem.open` — attach to an existing stream
 - :func:`pyshmem.unlink` — destroy a stream by name
 - :func:`pyshmem.unlink_quiet` — destroy a stream, ignoring "does not exist"
-- :func:`pyshmem.purge` — remove *all* pyshmem segments (and orphaned GPU IPC
-  files) from the machine
+- :func:`pyshmem.purge` — remove all validated pyshmem segments; global orphaned
+  PyTorch CUDA IPC cleanup requires an explicit option
 - :func:`pyshmem.stream` — context manager that creates and auto-unlinks
 - :func:`pyshmem.list_streams` — list the user-visible names of existing
   streams (Linux)

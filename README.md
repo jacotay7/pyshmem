@@ -124,7 +124,7 @@ with pyshmem.stream("scratch", shape=(256,)) as shm:
 | `owner` | `bool` | `True` if this handle created the stream |
 | `count` | `int` | Number of completed writes |
 | `write_time` | `float` | UNIX timestamp of the most recent write |
-| `write_sequence` | `int` | Internal write sequence counter (even = stable) |
+| `write_sequence` | `int` | Internal write sequence: positive odd = writing, non-negative even = stable, negative = incomplete write |
 
 ### `SharedMemory` methods
 
@@ -132,7 +132,7 @@ with pyshmem.stream("scratch", shape=(256,)) as shm:
 
 | Method | Description |
 |---|---|
-| `read(*, safe=True, poll_interval=1e-6, out=None)` | Return the current payload. `out` accepts a pre-allocated NumPy array (CPU only). |
+| `read(*, safe=True, poll_interval=1e-6, out=None, timeout=None)` | Return the current payload. `out` accepts a pre-allocated NumPy array (CPU only); `timeout` bounds an in-progress write. |
 | `read_new(*, timeout=None, safe=True, poll_interval=1e-5)` | Block until a new write, then return the payload. |
 | `await read_new_async(*, timeout=None, safe=True, poll_interval=1e-5)` | Asyncio-safe variant of `read_new`; yields to the event loop. |
 
@@ -277,7 +277,7 @@ with reader.locked():
 ```
 
 `read(out=buf)` — writes the snapshot into a pre-allocated NumPy array instead
-of allocating a new one. CPU streams only; ignored for GPU streams.
+of allocating a new one. CPU streams only; GPU handles reject `out`.
 
 ## Behavior Notes
 
@@ -289,6 +289,9 @@ of allocating a new one. CPU streams only; ignored for GPU streams.
 - `read_new` and `read_new_async` skip count checks while a write is in
   progress (odd `write_sequence`), preventing them from returning a partial
   write.
+- If a copy fails or its writer process exits mid-write, reads raise
+  `pyshmem.InconsistentStreamError` instead of polling forever. A subsequent
+  successful full write repairs the stream.
 - Locks are cross-process (`portalocker` file locks) and thread-reentrant
   (`threading.RLock`). Lock files live in `/tmp/pyshmem-locks-<uid>/` by
   default; set `PYSHMEM_LOCK_DIR` to override.
@@ -334,14 +337,16 @@ raises `ValueError` at construction time.
 
 ### Opening a GPU stream in another process
 
-Always pass `gpu_device=` when you need a CUDA tensor:
+By default, `open()` auto-attaches to the CUDA device stored in the stream:
 
 ```python
-reader = pyshmem.open("activations", gpu_device="cuda:0")
+reader = pyshmem.open("activations")
 tensor = reader.read()   # torch.Tensor on cuda:0
 ```
 
-Omitting `gpu_device` gives a CPU-only handle (metadata/locking only).
+Passing `gpu_device="cuda:0"` explicitly is also supported and validates that
+the requested device matches. Pass `gpu_device=False` to opt into a CPU-only
+view of a stream created with `cpu_mirror=True`.
 
 ## Platform Notes
 

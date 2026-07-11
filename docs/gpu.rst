@@ -178,9 +178,10 @@ This has consequences for memory lifecycle:
   in-process) and releases it only on :meth:`~pyshmem.SharedMemory.unlink`,
   which also calls :func:`torch.cuda.ipc_collect`.
 - If a producer dies without unlinking, it can leave orphaned ``cuda.shm.*``
-  reference-count files behind.  :func:`pyshmem.purge` (and ``pyshmem purge``
-  on the CLI) sweeps those for processes that are no longer alive — see
-  :doc:`cli`.
+  reference-count files behind. Ordinary :func:`pyshmem.purge` does not touch
+  this process-global PyTorch namespace. Pass ``include_cuda_orphans=True`` (or
+  use ``pyshmem purge --include-cuda-orphans``) to explicitly sweep files whose
+  producer processes are no longer alive — see :doc:`cli`.
 
 Platform note
 -------------

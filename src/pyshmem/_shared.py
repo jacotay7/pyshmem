@@ -118,6 +118,11 @@ class _SharedLockState:
         self.file_handle = builtins.open(path, "a+b")
         self.owner_thread_id: int | None = None
         self.depth = 0
+        self.reference_count = 0
+
+
+class InconsistentStreamError(RuntimeError):
+    """Raised when a writer failed before publishing a complete payload."""
 
 
 def gpu_available() -> bool:
@@ -201,7 +206,26 @@ def _lock_state(name: str) -> _SharedLockState:
         if state is None:
             state = _SharedLockState(path)
             _THREAD_LOCKS[path] = state
+        state.reference_count += 1
     return state
+
+
+def _release_lock_state(state: _SharedLockState) -> None:
+    """Drop one handle reference and close unused per-name lock state."""
+    with _THREAD_LOCK_GUARD:
+        state.reference_count -= 1
+        if state.reference_count > 0:
+            return
+        if state.reference_count < 0:
+            raise RuntimeError("shared lock state reference count underflow")
+        if state.owner_thread_id is not None:
+            raise RuntimeError(
+                "cannot discard a shared lock while it is owned"
+            )
+        current = _THREAD_LOCKS.get(state.path)
+        if current is state:
+            _THREAD_LOCKS.pop(state.path, None)
+        state.file_handle.close()
 
 
 def _cache_gpu_tensor(name: str, gpu_tensor: Any) -> None:
@@ -515,43 +539,50 @@ def _duplicate_name_error(name: str) -> FileExistsError:
     )
 
 
-def purge() -> list[str]:
+def purge(*, include_cuda_orphans: bool = False) -> list[str]:
     """Remove all pyshmem segments from shared memory.
 
-    Scans ``/dev/shm`` for all ``ps_*`` files (data, ``_meta``, and ``_gpu``
-    variants) and unlinks them, then removes any matching lock files.  It also
-    sweeps leftover torch CUDA IPC ref-count files (``cuda.shm.*``) created by
-    GPU streams whose producer process exited without releasing its tensors.
-    Returns the user-visible names of the streams removed (falling back to the
-    hashed ``ps_*`` segment id for streams created by older pyshmem versions
-    that did not record the name).
+    Scans ``/dev/shm`` for data segments whose metadata name hashes back to the
+    same pyshmem segment id.  Only validated streams and their exact metadata,
+    GPU-handle, and lock files are removed; unrelated ``ps_*`` objects are
+    preserved.  Returns the user-visible names of the streams removed.
+
+    By default this function does not touch PyTorch's process-global
+    ``cuda.shm.*`` files.  Set ``include_cuda_orphans=True`` to explicitly
+    sweep files whose encoded producer PID is no longer alive.  That operation
+    is broader than pyshmem and may remove orphaned files from other PyTorch
+    applications running under the same OS account.
 
     This is the correct tool for cleaning up after a test run or clearing a
     machine that has accumulated stale streams.  It is *not* reversible.
 
-    Use ``purge`` when you want to remove everything (including orphaned GPU
-    IPC files) without enumerating individual stream names.
+    Use ``purge`` when you want to remove every validated pyshmem stream
+    without enumerating individual names.
     """
     if os.name == "nt":
         return []
     shm_dir = "/dev/shm"
     if not os.path.isdir(shm_dir):
         return []
-    all_segment_files = set()
+    validated = []
     for path in glob.glob(os.path.join(shm_dir, "ps_*")):
-        all_segment_files.add(os.path.basename(path))
-    # Recover user-visible names from metadata segments *before* unlinking.
-    base_names = sorted(
-        s
-        for s in all_segment_files
-        if not s.endswith("_meta") and not s.endswith("_gpu")
-    )
-    purged_names = [_stream_name_for_base(base) or base for base in base_names]
+        base = os.path.basename(path)
+        if base.endswith("_meta") or base.endswith("_gpu"):
+            continue
+        stream_name = _validated_stream_name_for_base(base)
+        if stream_name is not None:
+            validated.append((base, stream_name))
+
+    segment_names = set()
+    for base, _ in validated:
+        for candidate in (base, f"{base}_meta", f"{base}_gpu"):
+            if os.path.exists(os.path.join(shm_dir, candidate)):
+                segment_names.add(candidate)
     if _can_directly_unlink_posix_segments():
-        for segment_name in sorted(all_segment_files):
+        for segment_name in sorted(segment_names):
             _safe_posix_shm_unlink(segment_name)
     else:
-        for segment_name in sorted(all_segment_files):
+        for segment_name in sorted(segment_names):
             shm = _open_existing_segment(segment_name)
             if shm is not None:
                 try:
@@ -567,14 +598,13 @@ def purge() -> list[str]:
     lock_dir = os.environ.get("PYSHMEM_LOCK_DIR") or os.path.join(
         tempfile.gettempdir(), f"pyshmem-locks-{uid}"
     )
-    for lock_path in glob.glob(os.path.join(lock_dir, "ps_*.lock")):
-        _safe_remove(lock_path)
-    _LOCAL_GPU_TENSORS.clear()
-    # Release this process's own freed CUDA IPC files, then sweep any orphans
-    # left behind by producers that exited without releasing their tensors.
+    for base, stream_name in validated:
+        _safe_remove(os.path.join(lock_dir, f"{base}.lock"))
+        _LOCAL_GPU_TENSORS.pop(stream_name, None)
     _collect_cuda_ipc()
-    _remove_orphaned_cuda_ipc_files()
-    return sorted(purged_names)
+    if include_cuda_orphans:
+        _remove_orphaned_cuda_ipc_files()
+    return sorted(stream_name for _, stream_name in validated)
 
 
 def unlink_quiet(name: str) -> None:
@@ -635,14 +665,51 @@ def _stream_name_for_base(base: str) -> str | None:
             pass
 
 
+def _validated_stream_name_for_base(base: str) -> str | None:
+    """Return a name only when metadata proves ``base`` is ours."""
+    if (
+        len(base) != 17
+        or not base.startswith("ps_")
+        or any(char not in "0123456789abcdef" for char in base[3:])
+    ):
+        return None
+    try:
+        meta_shm = shared_memory.SharedMemory(name=f"{base}_meta")
+    except FileNotFoundError:
+        return None
+    _unregister(meta_shm)
+    try:
+        if len(meta_shm.buf) < METADATA_TOTAL_BYTES:
+            return None
+        version = int(
+            np.ndarray(
+                (METADATA_SIZE,), dtype=np.float64, buffer=meta_shm.buf
+            )[METADATA_INDEX_VERSION]
+        )
+        if version != METADATA_VERSION:
+            return None
+        stream_name = _read_stream_name(meta_shm)
+        if stream_name is None or _segment_base_name(stream_name) != base:
+            return None
+        return stream_name
+    except (TypeError, ValueError, BufferError):
+        return None
+    finally:
+        try:
+            meta_shm.close()
+        except Exception:
+            pass
+
+
 def list_streams() -> list[str]:
     """Return the user-visible names of all existing pyshmem streams.
 
     On Linux, scans ``/dev/shm/`` for ``ps_*`` data-segment files and recovers
     the original name passed to :func:`create` from each stream's metadata.
-    Streams created by older pyshmem versions (which did not record the name)
-    fall back to their hashed ``ps_*`` segment id.  Returns an empty list on
-    platforms where the scan is not supported.
+    A candidate is listed only when its stored name hashes back to the exact
+    segment id; legacy or unrelated ``ps_*`` objects without validated metadata
+    are ignored. Returns an empty list on platforms where scanning is not
+    supported.
     """
     if os.name == "nt":
         return []
@@ -654,7 +721,9 @@ def list_streams() -> list[str]:
         base = os.path.basename(path)
         if base.endswith("_meta") or base.endswith("_gpu"):
             continue
-        result.append(_stream_name_for_base(base) or base)
+        stream_name = _validated_stream_name_for_base(base)
+        if stream_name is not None:
+            result.append(stream_name)
     return sorted(result)
 
 
@@ -710,6 +779,7 @@ class SharedMemory:
         self._torch_dtype = torch_dtype
         self._last_seen_count = int(self._metadata[METADATA_INDEX_COUNT])
         self._lock_state = _lock_state(name)
+        self._lock_state_released = False
         self._closed = False
         self._auto_unlink = False
 
@@ -750,11 +820,49 @@ class SharedMemory:
     def _lock_owned_by_current_thread(self) -> bool:
         return self._lock_state.owner_thread_id == threading.get_ident()
 
-    def _wait_for_stable_writer(self, poll_interval: float) -> int:
+    def _invalidate_abandoned_write(self, observed_sequence: int) -> bool:
+        """Mark an odd generation invalid after its writer process died."""
+        owner_pid = int(self._metadata[METADATA_INDEX_LOCK_OWNER_PID])
+        if owner_pid <= 0 or _pid_is_alive(owner_pid):
+            return False
+        try:
+            self.acquire(timeout=0.0)
+        except TimeoutError:
+            return False
+        try:
+            current = self.write_sequence
+            if current == observed_sequence and current > 0 and current % 2:
+                self._metadata[METADATA_INDEX_WRITE_SEQUENCE] = -current
+                return True
+            return current < 0
+        finally:
+            self.release()
+
+    def _wait_for_stable_writer(
+        self, poll_interval: float, timeout: float | None = None
+    ) -> int:
+        deadline = (
+            None if timeout is None else time.monotonic() + float(timeout)
+        )
         while True:
             sequence = self.write_sequence
+            if sequence < 0:
+                raise InconsistentStreamError(
+                    f"stream {self.name!r} contains an incomplete write; "
+                    "a successful write is required before it can be read"
+                )
             if sequence % 2 == 0:
                 return sequence
+            if self._invalidate_abandoned_write(sequence):
+                raise InconsistentStreamError(
+                    f"writer process for stream {self.name!r} exited during "
+                    "a write; a successful write is required before it can "
+                    "be read"
+                )
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"timed out waiting for a stable write on {self.name!r}"
+                )
             time.sleep(poll_interval)
 
     def _finish_write(self) -> None:
@@ -763,7 +871,22 @@ class SharedMemory:
         self._metadata[METADATA_INDEX_WRITE_SEQUENCE] += 1
 
     def _mark_write_started(self) -> None:
-        self._metadata[METADATA_INDEX_WRITE_SEQUENCE] += 1
+        sequence = int(self._metadata[METADATA_INDEX_WRITE_SEQUENCE])
+        if sequence < 0:
+            # A previous copy failed or its writer died.  The new write fully
+            # replaces the payload, so start a fresh odd generation beyond it.
+            sequence = abs(sequence)
+            self._metadata[METADATA_INDEX_WRITE_SEQUENCE] = (
+                sequence + 2 if sequence % 2 else sequence + 1
+            )
+            return
+        self._metadata[METADATA_INDEX_WRITE_SEQUENCE] = sequence + 1
+
+    def _abort_write(self) -> None:
+        """Publish an invalid generation without claiming partial data."""
+        sequence = int(self._metadata[METADATA_INDEX_WRITE_SEQUENCE])
+        if sequence >= 0:
+            self._metadata[METADATA_INDEX_WRITE_SEQUENCE] = -max(sequence, 1)
 
     def _lock_metadata_on_acquire(self) -> None:
         self._metadata[METADATA_INDEX_LOCK_OWNER_PID] = os.getpid()
@@ -776,9 +899,21 @@ class SharedMemory:
             return
         self._metadata[METADATA_INDEX_LOCK_DEPTH] = self._lock_state.depth
 
-    def _read_consistent_cpu(self, poll_interval: float, out=None):
+    def _read_consistent_cpu(
+        self, poll_interval: float, out=None, timeout: float | None = None
+    ):
+        deadline = (
+            None if timeout is None else time.monotonic() + float(timeout)
+        )
         while True:
-            start_sequence = self._wait_for_stable_writer(poll_interval)
+            remaining = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            start_sequence = self._wait_for_stable_writer(
+                poll_interval, timeout=remaining
+            )
             if out is not None:
                 np.copyto(out, self._array)
                 result = out
@@ -789,10 +924,22 @@ class SharedMemory:
                 self._last_seen_count = self.count
                 return result
 
-    def _read_consistent_gpu(self, poll_interval: float):
+    def _read_consistent_gpu(
+        self, poll_interval: float, timeout: float | None = None
+    ):
+        deadline = (
+            None if timeout is None else time.monotonic() + float(timeout)
+        )
         if self.cpu_mirror:
             while True:
-                start_sequence = self._wait_for_stable_writer(poll_interval)
+                remaining = (
+                    None
+                    if deadline is None
+                    else max(0.0, deadline - time.monotonic())
+                )
+                start_sequence = self._wait_for_stable_writer(
+                    poll_interval, timeout=remaining
+                )
                 cpu_snapshot = np.copy(self._array)
                 end_sequence = self.write_sequence
                 if start_sequence == end_sequence:
@@ -805,10 +952,21 @@ class SharedMemory:
                     torch.cuda.synchronize(device=self.gpu_device)
                     return result
 
-        result = self._gpu_tensor.clone()
-        torch.cuda.synchronize(device=self.gpu_device)
-        self._last_seen_count = self.count
-        return result
+        while True:
+            remaining = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            start_sequence = self._wait_for_stable_writer(
+                poll_interval, timeout=remaining
+            )
+            result = self._gpu_tensor.clone()
+            torch.cuda.synchronize(device=self.gpu_device)
+            end_sequence = self.write_sequence
+            if start_sequence == end_sequence:
+                self._last_seen_count = self.count
+                return result
 
     def acquire(
         self,
@@ -823,7 +981,18 @@ class SharedMemory:
         acquired before the deadline.
         """
         self._ensure_open("acquire")
-        self._lock_state.thread_lock.acquire()
+        deadline = (
+            None if timeout is None else time.monotonic() + float(timeout)
+        )
+        if deadline is None:
+            acquired_thread_lock = self._lock_state.thread_lock.acquire()
+        else:
+            remaining = max(0.0, deadline - time.monotonic())
+            acquired_thread_lock = self._lock_state.thread_lock.acquire(
+                timeout=remaining
+            )
+        if not acquired_thread_lock:
+            raise TimeoutError("timed out waiting for shared memory lock")
         thread_id = threading.get_ident()
         if self._lock_state.owner_thread_id == thread_id:
             self._lock_state.depth += 1
@@ -833,7 +1002,11 @@ class SharedMemory:
         try:
             _acquire_file_lock(
                 self._lock_state.file_handle,
-                timeout=timeout,
+                timeout=(
+                    None
+                    if deadline is None
+                    else max(0.0, deadline - time.monotonic())
+                ),
                 poll_interval=poll_interval,
             )
         except Exception:
@@ -1145,6 +1318,9 @@ class SharedMemory:
         if self._gpu_tensor is not None and not self.owner:
             self._gpu_tensor = None
         self._closed = True
+        if not self._lock_state_released:
+            _release_lock_state(self._lock_state)
+            self._lock_state_released = True
 
     def unlink(self) -> None:
         """Destroy the underlying named shared-memory stream."""
@@ -1178,13 +1354,18 @@ class SharedMemory:
             )
         with self.locked():
             self._mark_write_started()
-            if self._gpu_tensor is not None:
-                self._gpu_tensor.zero_()
-            if self.cpu_mirror:
-                self._array.fill(0)
-            if self._gpu_tensor is not None:
-                torch.cuda.synchronize(device=self.gpu_device)
-            self._finish_write()
+            try:
+                if self._gpu_tensor is not None:
+                    self._gpu_tensor.zero_()
+                if self.cpu_mirror:
+                    self._array.fill(0)
+                if self._gpu_tensor is not None:
+                    torch.cuda.synchronize(device=self.gpu_device)
+            except BaseException:
+                self._abort_write()
+                raise
+            else:
+                self._finish_write()
 
     def write(self, value: Any) -> None:
         """Write a full payload into the stream.
@@ -1221,14 +1402,19 @@ class SharedMemory:
 
         with self.locked():
             self._mark_write_started()
-            if tensor is not None:
-                self._gpu_tensor.copy_(tensor)
-                if self.cpu_mirror:
-                    np.copyto(self._array, tensor.detach().cpu().numpy())
-                torch.cuda.synchronize(device=self.gpu_device)
+            try:
+                if tensor is not None:
+                    self._gpu_tensor.copy_(tensor)
+                    if self.cpu_mirror:
+                        np.copyto(self._array, tensor.detach().cpu().numpy())
+                    torch.cuda.synchronize(device=self.gpu_device)
+                else:
+                    np.copyto(self._array, array)
+            except BaseException:
+                self._abort_write()
+                raise
             else:
-                np.copyto(self._array, array)
-            self._finish_write()
+                self._finish_write()
 
     def read(
         self,
@@ -1236,6 +1422,7 @@ class SharedMemory:
         safe: bool = True,
         poll_interval: float = 1e-6,
         out=None,
+        timeout: float | None = None,
     ):
         """Read the current payload from the stream.
 
@@ -1245,10 +1432,20 @@ class SharedMemory:
 
         ``out`` may be a pre-allocated NumPy array with the correct shape and
         dtype; when supplied for CPU streams, the data is written into it
-        directly (zero-copy, no allocation).  ``out`` is ignored for GPU
-        streams and in ``safe=False`` mode.
+        directly without allocating a result.  ``out`` is not supported for
+        GPU streams or in ``safe=False`` mode.
+
+        ``timeout`` bounds how long a safe read waits for an in-progress write
+        to finish.  A writer that exits mid-write raises
+        :class:`InconsistentStreamError` immediately; a successful replacement
+        write makes the stream readable again.
         """
         self._ensure_open("read from")
+        if out is not None and (self._gpu_tensor is not None or not safe):
+            raise ValueError(
+                "out is supported only for safe CPU reads; pass a NumPy "
+                "destination buffer to a CPU-backed handle"
+            )
         if not safe:
             if not self._lock_owned_by_current_thread():
                 raise RuntimeError(
@@ -1266,14 +1463,16 @@ class SharedMemory:
             return self._array
 
         if self._gpu_tensor is not None:
-            return self._read_consistent_gpu(poll_interval)
+            return self._read_consistent_gpu(poll_interval, timeout=timeout)
         if self.gpu_enabled and not self.cpu_mirror:
             raise RuntimeError(
                 "GPU shared memory was created without cpu_mirror=True; "
                 "reopen it with "
                 f"pyshmem.open({self.name!r}, gpu_device='cuda:N')"
             )
-        return self._read_consistent_cpu(poll_interval, out=out)
+        return self._read_consistent_cpu(
+            poll_interval, out=out, timeout=timeout
+        )
 
     def read_new(
         self,
@@ -1293,7 +1492,21 @@ class SharedMemory:
         start = time.monotonic()
         while True:
             # Skip polling count while a write is in progress (odd sequence).
-            if self.write_sequence % 2 == 0 and self.count != baseline:
+            sequence = self.write_sequence
+            if sequence < 0:
+                raise InconsistentStreamError(
+                    f"stream {self.name!r} contains an incomplete write; "
+                    "a successful write is required before it can be read"
+                )
+            if sequence % 2 == 1 and self._invalidate_abandoned_write(
+                sequence
+            ):
+                raise InconsistentStreamError(
+                    f"writer process for stream {self.name!r} exited during "
+                    "a write; a successful write is required before it can "
+                    "be read"
+                )
+            if sequence % 2 == 0 and self.count != baseline:
                 break
             if timeout is not None and (time.monotonic() - start) >= float(
                 timeout
@@ -1302,7 +1515,12 @@ class SharedMemory:
                     f"timed out waiting for a new write on {self.name!r}"
                 )
             time.sleep(poll_interval)
-        return self.read(safe=safe, out=out)
+        remaining = (
+            None
+            if timeout is None
+            else max(0.0, float(timeout) - (time.monotonic() - start))
+        )
+        return self.read(safe=safe, out=out, timeout=remaining)
 
     def write_locked(self, value: Any) -> None:
         """Write a payload without acquiring the lock.
@@ -1327,11 +1545,16 @@ class SharedMemory:
                     f"expected shape {self.shape}, got {tuple(tensor.shape)}"
                 )
             self._mark_write_started()
-            self._gpu_tensor.copy_(tensor)
-            if self.cpu_mirror:
-                np.copyto(self._array, tensor.detach().cpu().numpy())
-            torch.cuda.synchronize(device=self.gpu_device)
-            self._finish_write()
+            try:
+                self._gpu_tensor.copy_(tensor)
+                if self.cpu_mirror:
+                    np.copyto(self._array, tensor.detach().cpu().numpy())
+                torch.cuda.synchronize(device=self.gpu_device)
+            except BaseException:
+                self._abort_write()
+                raise
+            else:
+                self._finish_write()
         elif self.gpu_enabled and not self.cpu_mirror:
             raise RuntimeError(
                 "cannot write to GPU shared memory without a GPU attachment; "
@@ -1345,8 +1568,13 @@ class SharedMemory:
                     f"expected shape {self.shape}, got {tuple(array.shape)}"
                 )
             self._mark_write_started()
-            np.copyto(self._array, array)
-            self._finish_write()
+            try:
+                np.copyto(self._array, array)
+            except BaseException:
+                self._abort_write()
+                raise
+            else:
+                self._finish_write()
 
     async def read_new_async(
         self,
@@ -1365,7 +1593,21 @@ class SharedMemory:
         baseline = self.count
         start = time.monotonic()
         while True:
-            if self.write_sequence % 2 == 0 and self.count != baseline:
+            sequence = self.write_sequence
+            if sequence < 0:
+                raise InconsistentStreamError(
+                    f"stream {self.name!r} contains an incomplete write; "
+                    "a successful write is required before it can be read"
+                )
+            if sequence % 2 == 1 and self._invalidate_abandoned_write(
+                sequence
+            ):
+                raise InconsistentStreamError(
+                    f"writer process for stream {self.name!r} exited during "
+                    "a write; a successful write is required before it can "
+                    "be read"
+                )
+            if sequence % 2 == 0 and self.count != baseline:
                 break
             if timeout is not None and (time.monotonic() - start) >= float(
                 timeout
@@ -1374,7 +1616,12 @@ class SharedMemory:
                     f"timed out waiting for a new write on {self.name!r}"
                 )
             await asyncio.sleep(poll_interval)
-        return self.read(safe=safe, out=out)
+        remaining = (
+            None
+            if timeout is None
+            else max(0.0, float(timeout) - (time.monotonic() - start))
+        )
+        return self.read(safe=safe, out=out, timeout=remaining)
 
     def describe(self) -> str:
         """Return a human-readable summary of the stream's metadata."""
