@@ -32,6 +32,7 @@ import tempfile
 import threading
 import time
 import weakref
+import zlib
 from multiprocessing import resource_tracker, shared_memory
 from typing import Any, Sequence
 
@@ -98,6 +99,7 @@ METADATA_MAGIC = b"PYSHMEM\x00"
 METADATA_FLAG_GPU_ENABLED = 1 << 0
 METADATA_FLAG_CPU_MIRROR_ENABLED = 1 << 1
 METADATA_FLAG_INSTANCE_ID = 1 << 2
+METADATA_FLAG_HEADER_CRC = 1 << 3
 METADATA_V3_DTYPE = np.dtype(
     {
         "names": [
@@ -116,6 +118,7 @@ METADATA_V3_DTYPE = np.dtype(
             "lock_owner_pid",
             "lock_depth",
             "instance_id",
+            "header_crc",
             "reserved",
             "shape",
         ],
@@ -135,7 +138,8 @@ METADATA_V3_DTYPE = np.dtype(
             "<i8",
             "<u4",
             "S16",
-            "V12",
+            "<u4",
+            "V8",
             ("<u8", METADATA_SIZE - METADATA_INDEX_SHAPE_START),
         ],
         "offsets": [
@@ -155,10 +159,23 @@ METADATA_V3_DTYPE = np.dtype(
             72,
             76,
             92,
+            96,
             104,
         ],
         "itemsize": METADATA_BYTES,
     }
+)
+# Fields that mutate after creation (or hold the checksum itself) are excluded
+# from the header CRC so writes and lock churn never invalidate it — the CRC
+# authenticates only the immutable geometry/identity fields plus the name
+# region and is computed once at creation.
+_CRC_EXCLUDED_FIELDS = (
+    "count",
+    "write_sequence",
+    "write_time",
+    "lock_owner_pid",
+    "lock_depth",
+    "header_crc",
 )
 # A fixed byte region appended after the float64 metadata block stores the
 # original, user-visible stream name (UTF-8, null-padded).  Segment ids are a
@@ -483,6 +500,37 @@ def _write_stream_name(metadata_shm: shared_memory.SharedMemory, name: str):
     encoded = _encode_stream_name(name)
     buf[METADATA_BYTES:METADATA_TOTAL_BYTES] = b"\x00" * METADATA_NAME_MAX
     buf[METADATA_BYTES : METADATA_BYTES + len(encoded)] = encoded
+
+
+def _header_crc(buf) -> int:
+    """CRC-32 over the immutable header fields plus the name region.
+
+    Mutable counters and the CRC slot itself are zeroed before hashing so the
+    value is stable across writes and independent of the order in which it is
+    computed.
+    """
+    header = bytearray(bytes(buf[:METADATA_BYTES]))
+    for field in _CRC_EXCLUDED_FIELDS:
+        sub_dtype, offset = METADATA_V3_DTYPE.fields[field]
+        width = sub_dtype.itemsize
+        header[offset : offset + width] = bytes(width)
+    name_region = bytes(buf[METADATA_BYTES:METADATA_TOTAL_BYTES])
+    return zlib.crc32(bytes(header) + name_region) & 0xFFFFFFFF
+
+
+def _finalize_header_crc(metadata_shm: shared_memory.SharedMemory) -> None:
+    """Stamp the header CRC and its feature flag onto a freshly created stream.
+
+    Must run after every immutable field (including the name region) is
+    written, since the CRC covers them.
+    """
+    buf = metadata_shm.buf
+    if len(buf) < METADATA_TOTAL_BYTES:
+        return
+    v3 = np.ndarray((), dtype=METADATA_V3_DTYPE, buffer=buf)
+    v3["flags"] = int(v3["flags"]) | METADATA_FLAG_HEADER_CRC
+    v3["header_crc"] = 0
+    v3["header_crc"] = _header_crc(buf)
 
 
 def _read_stream_name(
@@ -864,6 +912,7 @@ def _decode_metadata_header(
             METADATA_FLAG_GPU_ENABLED
             | METADATA_FLAG_CPU_MIRROR_ENABLED
             | METADATA_FLAG_INSTANCE_ID
+            | METADATA_FLAG_HEADER_CRC
         )
         if flags & ~known_flags:
             raise ValueError(f"unsupported metadata flags: 0x{flags:x}")
@@ -958,6 +1007,17 @@ def _decode_metadata_header(
         raise ValueError("lock metadata cannot be negative")
     if (lock_owner == 0) != (lock_depth == 0):
         raise ValueError("lock owner and depth metadata are inconsistent")
+
+    # Final integrity backstop: the granular checks above give precise
+    # diagnostics for individual fields; the CRC additionally catches silent
+    # bit-flips or torn writes that leave every field individually plausible.
+    if metadata.layout_version == METADATA_VERSION:
+        stored_crc = int(metadata._v3["header_crc"])
+        if int(metadata._v3["flags"]) & METADATA_FLAG_HEADER_CRC:
+            if stored_crc != _header_crc(metadata_shm.buf):
+                raise ValueError("metadata header checksum mismatch")
+        elif stored_crc != 0:
+            raise ValueError("header_crc requires its metadata feature flag")
 
     return {
         "dtype": dtype,
@@ -1827,6 +1887,7 @@ class SharedMemory:
             for index, axis in enumerate(normalized_shape):
                 metadata[METADATA_INDEX_SHAPE_START + index] = axis
             _write_stream_name(metadata_shm, name)
+            _finalize_header_crc(metadata_shm)
         except Exception:
             try:
                 data_shm.close()

@@ -35,7 +35,7 @@ updated counters are aligned to eight-byte boundaries.
    * - flags
      - 12
      - uint32
-     - GPU, CPU-mirror, and instance-id feature bits
+     - GPU, CPU-mirror, instance-id, and header-CRC feature bits
    * - dtype_code
      - 16
      - uint16
@@ -80,9 +80,13 @@ updated counters are aligned to eight-byte boundaries.
      - 76
      - 16 bytes
      - Random identity for this name generation
-   * - reserved
+   * - header_crc
      - 92
-     - 12 bytes
+     - uint32
+     - CRC-32 of the immutable header fields plus the name region
+   * - reserved
+     - 96
+     - 8 bytes
      - Must be zero; reserved for extensions
    * - shape
      - 104
@@ -115,6 +119,18 @@ state, and that the data segment is large enough for the declared payload.
 Segment-length checks require a sufficient (not exact) mapping because macOS
 rounds shared-memory allocations up to a page. Discovery and purge apply the
 same header validation and ignore candidates that fail it.
+
+As a final integrity backstop, streams carrying the header-CRC feature flag
+also validate ``header_crc``: a CRC-32 computed once at creation over the
+immutable header fields (everything except the mutating ``count``,
+``write_sequence``, ``write_time``, ``lock_owner_pid``, and ``lock_depth``
+counters, and the CRC slot itself) together with the 256-byte name region.
+Because the hot-path counters are excluded, ordinary writes and lock activity
+never disturb it. The granular field checks above give precise diagnostics for
+individual malformed fields; the CRC additionally rejects silent bit-flips or
+torn header writes that leave every field individually plausible. Version 2
+streams and early version 3 streams predating the flag carry no CRC and skip
+this check.
 
 The random ``instance_id`` distinguishes successive streams created under the
 same user-visible name. Handle-level unlink verifies this identity while

@@ -30,6 +30,13 @@ All notable user-facing changes are documented here. The project follows
 - Added `pyshmem.open(..., readonly=True)` for consumer handles that reject
   writes, clears, write-lock acquisition, unsafe zero-copy views, pinned-buffer
   allocation, and handle-level unlink with `PermissionError`.
+- Documented that `read_new` is edge-triggered and unsuitable for synchronous
+  request/response ("ping-pong") exchanges; showed the level-triggered
+  `count`-poll pattern for lock-step consumers.
+- Added a v3-metadata header CRC-32 (`header_crc` field + feature flag) covering
+  the immutable header fields and name region, validated on open, discovery, and
+  purge to reject silent corruption or torn header writes. Backward-compatible:
+  version 2 and pre-flag version 3 streams skip the check.
 
 ## 1.0.5
 

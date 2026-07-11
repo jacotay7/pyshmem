@@ -845,10 +845,13 @@ def test_open_rejects_nonzero_reserved_and_unused_shape(shm_name):
         buffer=owner._metadata_shm.buf,
     )
     try:
-        header["reserved"] = b"x" + b"\x00" * 11
+        reserved_width = pyshmem_shared.METADATA_V3_DTYPE.fields["reserved"][
+            0
+        ].itemsize
+        header["reserved"] = b"x" + b"\x00" * (reserved_width - 1)
         with pytest.raises(ValueError, match="reserved metadata"):
             pyshmem.open(shm_name)
-        header["reserved"] = b"\x00" * 12
+        header["reserved"] = b"\x00" * reserved_width
         header["shape"][1] = 9
         with pytest.raises(ValueError, match="unused shape"):
             pyshmem.open(shm_name)
@@ -862,6 +865,90 @@ def test_open_rejects_metadata_name_mismatch(shm_name):
     try:
         with pytest.raises(ValueError, match="metadata name mismatch"):
             pyshmem.open(shm_name)
+    finally:
+        owner.close()
+
+
+def test_new_stream_stamps_header_crc(shm_name):
+    owner = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
+    try:
+        header = np.ndarray(
+            (),
+            dtype=pyshmem_shared.METADATA_V3_DTYPE,
+            buffer=owner._metadata_shm.buf,
+        )
+        flags = int(header["flags"])
+        assert flags & pyshmem_shared.METADATA_FLAG_HEADER_CRC
+        assert int(header["header_crc"]) == pyshmem_shared._header_crc(
+            owner._metadata_shm.buf
+        )
+    finally:
+        owner.close()
+
+
+def test_header_crc_survives_writes_and_locking(shm_name):
+    owner = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
+    try:
+        # Writes (count/sequence/write_time) and lock churn must not disturb
+        # the CRC, since those fields are excluded from it.
+        for value in range(5):
+            owner.write(np.full(4, value, dtype=np.float32))
+        with owner.locked():
+            owner.write_locked(np.ones(4, dtype=np.float32))
+        reader = pyshmem.open(shm_name)
+        try:
+            np.testing.assert_array_equal(reader.read(), np.ones(4))
+        finally:
+            reader.close()
+    finally:
+        owner.unlink()
+
+
+def test_open_rejects_silent_bitflip_via_header_crc(shm_name):
+    owner = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
+    header = np.ndarray(
+        (),
+        dtype=pyshmem_shared.METADATA_V3_DTYPE,
+        buffer=owner._metadata_shm.buf,
+    )
+    try:
+        # creator_pid stays a valid positive value, so every granular check
+        # passes; only the CRC backstop can detect the tampering.
+        header["creator_pid"] = int(header["creator_pid"]) + 1
+        with pytest.raises(ValueError, match="header checksum mismatch"):
+            pyshmem.open(shm_name)
+    finally:
+        owner.close()
+
+
+def test_header_crc_flag_required_when_checksum_present(shm_name):
+    owner = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
+    header = np.ndarray(
+        (),
+        dtype=pyshmem_shared.METADATA_V3_DTYPE,
+        buffer=owner._metadata_shm.buf,
+    )
+    try:
+        header["flags"] = int(header["flags"]) & ~(
+            pyshmem_shared.METADATA_FLAG_HEADER_CRC
+        )
+        with pytest.raises(ValueError, match="requires its metadata feature"):
+            pyshmem.open(shm_name)
+    finally:
+        owner.close()
+
+
+def test_discovery_ignores_corrupt_header_crc(shm_name):
+    owner = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
+    header = np.ndarray(
+        (),
+        dtype=pyshmem_shared.METADATA_V3_DTYPE,
+        buffer=owner._metadata_shm.buf,
+    )
+    try:
+        assert shm_name in pyshmem.list_streams()
+        header["creator_pid"] = int(header["creator_pid"]) + 1
+        assert shm_name not in pyshmem.list_streams()
     finally:
         owner.close()
 

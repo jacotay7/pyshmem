@@ -49,6 +49,7 @@ surface is Linux and macOS; CUDA support is Linux-only.
 | Stream-local CUDA synchronization | Done | GPU read/write/clear records and synchronizes an event on the active CUDA stream instead of calling whole-device `torch.cuda.synchronize`. Publication remains synchronous and safe. A regression test forbids the global API while round-trip and clear operations succeed. Fully async cross-process publication remains open. |
 | Capability-driven dtype support | Done | GPU dtype support is derived from attributes exposed by the installed PyTorch instead of a stale fixed subset. The persistent table was backward-compatibly extended with bool and complex64/128. CPU and real-CUDA tests cover bool/complex and torch 2.10 unsigned 16/32/64-bit round trips. |
 | Read-only consumer handles | Done | `open(..., readonly=True)` returns a per-handle guarded consumer: `write`, `write_locked`, `clear`, `acquire`/`locked`, `pinned_buffer`, unsafe (`safe=False`) reads, and handle-level `unlink` raise `PermissionError`, while reads snapshot normally. The guard is per handle, not segment-level, so other writable handles and the owner keep publishing; `describe()` reports the flag. CPU and real-CUDA (RTX 5090) regression tests cover snapshot-then-reject behaviour. |
+| Metadata checksum / authenticated header | Done | New v3 streams stamp a `header_crc` CRC-32 (behind a feature flag) over the immutable header fields plus the name region; mutating counters and lock fields are excluded so writes never invalidate it. Open, discovery, and purge validate it as a final backstop after the granular field checks, rejecting silent bit-flips or torn header writes that leave every field individually plausible. Backward compatible with v2 and pre-flag v3. Regression tests cover stamping, survival across writes/locking, silent-bitflip rejection on open, the flag-required rule, and discovery ignoring a corrupt header. |
 
 ## Verification record
 
@@ -75,8 +76,10 @@ precisely isolating that lifecycle warning remains open.
    x86-64 TSO, runtime `libatomic`, and the OS-lock fallback now enforce the
    specified model; no known supported-platform ordering gap remains.
 2. Extend format validation only when new fields/features are introduced. The
-   current v3 semantic fields and segment geometry are validated; checksums or
-   authenticated metadata remain optional future hardening.
+   current v3 semantic fields and segment geometry are validated, and a header
+   CRC-32 now rejects silent corruption/torn header writes. Cryptographically
+   authenticated metadata (vs. a plain checksum) remains optional future
+   hardening.
 3. Residual private PyTorch reduction internals. The pickle trust boundary is
    now closed with an authenticating restricted unpickler, and the private
    `resource_tracker` reach-in is avoided on Python 3.13+ via public
