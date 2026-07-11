@@ -29,7 +29,8 @@ Scope: first remediation batch following the critical adopter review
 | Unlink/recreate lock-inode generation | Done | `_SharedLockState` records the lock file's inode and rebinds a stale handle on each acquire when the pathname resolves to a new inode, so a stream destroyed and recreated while old handles are live reconverges on one shared lock instead of splitting into per-generation locks. Regression tests cover the refresh mechanism and post-recreate convergence (verified load-bearing against a disabled-refresh baseline); `docs/platforms.rst` documents the semantics. |
 | Private resource-tracker API | Done | All segment open/create paths go through `_attach_segment()`, which uses the public `track=False` argument on Python 3.13+ and only falls back to the private `resource_tracker.unregister` on <=3.12. Tests assert the capability probe matches the `SharedMemory` signature and that `_attach_segment` branches correctly (track-false path never unregisters; fallback path does). The pickled CUDA reduction trust boundary is a separate, still-open item. |
 | Fault testing: metadata/kills/contention | Done (CPU scope) | Added CPU regression tests for a truncated metadata segment (clean rejection), repeated writer kills each recovering to `InconsistentStreamError` then repairing, and concurrent multi-writer/reader contention proving no torn seqlock snapshots and no deadlock (stable across 10 repeats). |
-| Fault testing: CUDA failure during publication | Done | GPU regression test injects a CUDA error at publication-time synchronize and asserts the write path's `_abort_write` leaves the stream invalid (`InconsistentStreamError` on read) and that a later good write repairs it. Validated on an RTX 5090. Fork inheritance remains the last open fault-testing item. |
+| Fault testing: CUDA failure during publication | Done | GPU regression test injects a CUDA error at publication-time synchronize and asserts the write path's `_abort_write` leaves the stream invalid (`InconsistentStreamError` on read) and that a later good write repairs it. Validated on an RTX 5090. |
+| Fork-state hardening | Done | An `os.register_at_fork` child handler resets each inherited `_SharedLockState` (fresh re-entrant lock, cleared held flag, reopened private lock-file descriptor) and drops cached CUDA IPC tensors. A regression test forks while the parent holds the lock and asserts the child neither inherits held state nor shares the parent's lock (its acquire blocks on the parent), verified load-bearing against a no-reset baseline. Documented in `docs/platforms.rst`. |
 | Pickle CUDA trust boundary | Done | GPU handle reconstruction no longer calls raw `pickle.loads` on the writable 0600 segment. `_RestrictedCudaUnpickler` permits only torch's known CUDA rebuild globals and inert dtype values, so a tampered payload raises `UnpicklingError` instead of executing code. Validated on an RTX 5090: a legit reduction still round-trips, a child opening a tampered handle fails with `disallowed global`, and a torch-independent CPU test covers the rejection path. Documented in `docs/format.rst` and CLAUDE.md. |
 
 ## Verification record
@@ -70,9 +71,10 @@ precisely isolating that lifecycle warning remains open.
    `track=False`. What remains is that reconstruction still depends on torch's
    private `rebuild_cuda_tensor`/`_lazy_init` internals, which carry no stable
    API guarantee across torch versions.
-5. Expand fault testing. Malformed/truncated metadata, repeated writer kills,
-   multi-writer contention (CPU), and CUDA-failure-during-publication (GPU) now
-   have regression tests. Fork/spawn inheritance is the last open item.
+5. Fault testing is now covered: malformed/truncated metadata, repeated writer
+   kills, multi-writer contention, CUDA-failure-during-publication, and
+   fork-state inheritance all have regression tests. Prolonged multi-host or
+   many-hour soak stress could still be added but is not a correctness gap.
 
 ### P1 product and validation
 

@@ -1818,3 +1818,40 @@ def test_acquire_reconverges_after_unlink_recreate(shm_name):
         fresh_handle.close()
         a.close()
         pyshmem.unlink(shm_name)
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fork"), reason="fork-state hardening requires os.fork"
+)
+@pytest.mark.filterwarnings(
+    "ignore:.*multi-threaded.*fork.*:DeprecationWarning"
+)
+def test_fork_resets_inherited_lock_state(shm_name):
+    shm = pyshmem.create(shm_name, shape=(1,), dtype=np.float32)
+    shm.acquire()  # parent holds the cross-process lock across the fork
+    try:
+        pid = os.fork()
+        if pid == 0:
+            # Child: it must not inherit the parent's held-lock state, and its
+            # lock file description must be independent (so real acquisition is
+            # attempted and blocks on the parent's still-held cross-process
+            # lock rather than falsely succeeding).
+            try:
+                state = shm._lock_state
+                reset = state.owner_thread_id is None and state.depth == 0
+                blocked = False
+                if reset:
+                    try:
+                        shm.acquire(timeout=0.1)
+                    except TimeoutError:
+                        blocked = True
+                os._exit(0 if (reset and blocked) else 1)
+            except BaseException:
+                os._exit(2)
+        else:
+            _, status = os.waitpid(pid, 0)
+            assert os.WIFEXITED(status)
+            assert os.WEXITSTATUS(status) == 0
+    finally:
+        shm.release()
+        shm.close()

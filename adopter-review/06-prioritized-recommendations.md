@@ -7,15 +7,17 @@ Detailed evidence is in [Implementation status](00-implementation-status.md).
 - P0.1: **implemented with explicit invalid-state recovery and bounded reads**;
   double buffering remains a possible stronger future design.
 - P0.2: **implemented**.
-- P0.3: **implemented** for descriptor lifetime; fork-state hardening remains.
+- P0.3: **implemented** for descriptor lifetime and fork-state hardening (an
+  `os.register_at_fork` child handler resets inherited lock state and reopens a
+  private lock descriptor, with a regression test).
 - P0.4: **implemented** for ownership validation and CUDA cleanup scope;
   metadata magic, namespaces, and dry-run remain.
 - P0.5: **implemented at the generation protocol level**; cross-process CUDA
   events and asynchronous stream ordering remain.
-- P1.5: **substantially implemented** with failed-copy, writer-kill, timeout,
-  descriptor, purge, GPU odd-sequence, truncated-metadata, repeated-writer-kill,
-  multi-writer contention, and GPU CUDA-failure-during-publication tests.
-  Fork/spawn inheritance is the last open item.
+- P1.5: **implemented** with failed-copy, writer-kill, timeout, descriptor,
+  purge, GPU odd-sequence, truncated-metadata, repeated-writer-kill,
+  multi-writer contention, GPU CUDA-failure-during-publication, and fork-state
+  inheritance tests. Only long-duration soak stress remains optional.
 - P1.3: **substantially implemented** — segment open/create goes through
   `_attach_segment()`, which uses the public `track=False` on Python 3.13+ and
   only falls back to the private `resource_tracker` API on <=3.12; and the

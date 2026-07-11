@@ -437,6 +437,47 @@ def _release_lock_state(state: _SharedLockState) -> None:
         state.file_handle.close()
 
 
+def _reset_locks_after_fork() -> None:
+    """Reset inherited lock state in a forked child.
+
+    ``os.fork()`` duplicates every :class:`_SharedLockState`, including the
+    lock file descriptor and any "held" flag.  A child that believed it
+    inherited the parent's held lock would skip acquisition and corrupt data,
+    and a shared file description would let a child release the parent's
+    cross-process lock.  Runs single-threaded in the child (right after fork),
+    so it manipulates the caches without taking the guard locks and replaces
+    those guards in case they were held at fork time.
+    """
+    global _THREAD_LOCK_GUARD, _GPU_OPEN_LOCKS_GUARD
+    _THREAD_LOCK_GUARD = threading.Lock()
+    _GPU_OPEN_LOCKS_GUARD = threading.Lock()
+    for state in list(_THREAD_LOCKS.values()):
+        # Fresh RLock (an inherited one may look held) and a private open
+        # file description so the child's advisory lock is independent of the
+        # parent.
+        state.thread_lock = threading.RLock()
+        state.owner_thread_id = None
+        state.depth = 0
+        try:
+            handle, inode = _open_lock_file(state.path)
+        except OSError:
+            continue
+        try:
+            state.file_handle.close()
+        except Exception:
+            pass
+        state.file_handle = handle
+        state.inode = inode
+    # CUDA state does not survive fork; the child must not reuse the parent's
+    # cached IPC tensors or per-name reconstruction locks.
+    _GPU_OPEN_LOCKS.clear()
+    _LOCAL_GPU_TENSORS.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_locks_after_fork)
+
+
 def _cache_gpu_tensor(name: str, gpu_tensor: Any) -> None:
     _LOCAL_GPU_TENSORS[name] = weakref.ref(gpu_tensor)
 

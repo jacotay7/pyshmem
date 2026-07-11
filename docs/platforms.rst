@@ -89,3 +89,17 @@ same lock, pyshmem records the lock file's inode and, on each lock acquisition,
 rebinds a handle whose pathname now resolves to a different inode.  A recreated
 stream therefore converges on one shared lock object rather than splitting into
 independent locks per handle generation.
+
+Fork safety
+~~~~~~~~~~~
+
+``os.fork()`` duplicates a process's lock state, including the lock file
+descriptor and any "held" flag.  pyshmem registers an ``os.register_at_fork``
+child handler that, in the child, gives each inherited lock state a fresh
+re-entrant lock, clears the held flag, and reopens the lock file to a private
+descriptor.  A forked child therefore never believes it inherited the parent's
+held lock and cannot release the parent's cross-process lock through a shared
+descriptor.  (CUDA state does not survive fork; the child also drops any cached
+IPC tensors.)  Forking a multi-threaded process remains generally hazardous —
+prefer the ``spawn`` start method — but pyshmem's own lock state is left
+consistent.
