@@ -98,6 +98,13 @@ created as version 3. Unknown versions, invalid v3 header sizes, and malformed
 headers are rejected rather than guessed. Version 2 support is intended for
 attaching to streams left by pyshmem 1.0.x; there is no in-place conversion.
 
+Before mapping a payload, ``open()`` validates the metadata segment length,
+known flags, zeroed reserved bytes, UTF-8 name/hash relationship, dtype code,
+dimension bounds, positive shape, zeroed unused dimensions, exact
+shape/dtype/size product, CPU/GPU device rules, creator PID, timestamps, lock
+state, and the actual data-segment byte length. Discovery and purge apply the
+same header validation and ignore candidates that fail it.
+
 Memory ordering
 ---------------
 

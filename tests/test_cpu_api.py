@@ -667,6 +667,7 @@ def test_open_accepts_legacy_v2_metadata(shm_name):
         legacy[pyshmem_shared.METADATA_INDEX_NDIM] = 1
         legacy[pyshmem_shared.METADATA_INDEX_SIZE] = 16
         legacy[pyshmem_shared.METADATA_INDEX_DEVICE_INDEX] = -1
+        legacy[pyshmem_shared.METADATA_INDEX_CREATOR_PID] = os.getpid()
         legacy[pyshmem_shared.METADATA_INDEX_CPU_MIRROR_ENABLED] = 1
         legacy[pyshmem_shared.METADATA_INDEX_SHAPE_START] = 4
         pyshmem_shared._write_stream_name(meta, shm_name)
@@ -677,6 +678,93 @@ def test_open_accepts_legacy_v2_metadata(shm_name):
             np.testing.assert_array_equal(opened.read(), payload)
         finally:
             opened.close()
+    finally:
+        data.close()
+        meta.close()
+        pyshmem.unlink(shm_name)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("flags", 1 << 7, "unsupported metadata flags"),
+        ("ndim", 0, "invalid ndim"),
+        ("size", 1, "does not match shape and dtype"),
+        ("creator_pid", 0, "invalid creator_pid"),
+        ("lock_depth", 1, "lock owner and depth"),
+    ],
+)
+def test_open_rejects_corrupt_v3_metadata(shm_name, field, value, message):
+    owner = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
+    header = np.ndarray(
+        (),
+        dtype=pyshmem_shared.METADATA_V3_DTYPE,
+        buffer=owner._metadata_shm.buf,
+    )
+    header[field] = value
+    try:
+        with pytest.raises(ValueError, match=message):
+            pyshmem.open(shm_name)
+    finally:
+        owner.close()
+
+
+def test_open_rejects_nonzero_reserved_and_unused_shape(shm_name):
+    owner = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
+    header = np.ndarray(
+        (),
+        dtype=pyshmem_shared.METADATA_V3_DTYPE,
+        buffer=owner._metadata_shm.buf,
+    )
+    try:
+        header["reserved"] = b"x" + b"\x00" * 27
+        with pytest.raises(ValueError, match="reserved metadata"):
+            pyshmem.open(shm_name)
+        header["reserved"] = b"\x00" * 28
+        header["shape"][1] = 9
+        with pytest.raises(ValueError, match="unused shape"):
+            pyshmem.open(shm_name)
+    finally:
+        owner.close()
+
+
+def test_open_rejects_metadata_name_mismatch(shm_name):
+    owner = pyshmem.create(shm_name, shape=(1,), dtype=np.float32)
+    pyshmem_shared._write_stream_name(owner._metadata_shm, "different-name")
+    try:
+        with pytest.raises(ValueError, match="metadata name mismatch"):
+            pyshmem.open(shm_name)
+    finally:
+        owner.close()
+
+
+def test_open_rejects_data_segment_size_mismatch(shm_name):
+    from multiprocessing import shared_memory
+
+    data = shared_memory.SharedMemory(
+        name=pyshmem_shared._data_name(shm_name), create=True, size=8
+    )
+    meta = shared_memory.SharedMemory(
+        name=pyshmem_shared._metadata_name(shm_name),
+        create=True,
+        size=pyshmem_shared.METADATA_TOTAL_BYTES,
+    )
+    pyshmem_shared._unregister(data)
+    pyshmem_shared._unregister(meta)
+    metadata = pyshmem_shared._MetadataView(meta.buf, initialize=True)
+    metadata[pyshmem_shared.METADATA_INDEX_DTYPE] = (
+        pyshmem_shared._dtype_to_code(np.dtype(np.float32))
+    )
+    metadata[pyshmem_shared.METADATA_INDEX_NDIM] = 1
+    metadata[pyshmem_shared.METADATA_INDEX_SIZE] = 16
+    metadata[pyshmem_shared.METADATA_INDEX_DEVICE_INDEX] = -1
+    metadata[pyshmem_shared.METADATA_INDEX_CREATOR_PID] = os.getpid()
+    metadata[pyshmem_shared.METADATA_INDEX_CPU_MIRROR_ENABLED] = 1
+    metadata[pyshmem_shared.METADATA_INDEX_SHAPE_START] = 4
+    pyshmem_shared._write_stream_name(meta, shm_name)
+    try:
+        with pytest.raises(ValueError, match="data segment size"):
+            pyshmem.open(shm_name)
     finally:
         data.close()
         meta.close()

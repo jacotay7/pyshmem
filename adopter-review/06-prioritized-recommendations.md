@@ -19,8 +19,8 @@ Detailed evidence is in [Implementation status](00-implementation-status.md).
   removal are **implemented**.
 - P1.2: **format foundation implemented** with a documented v3 magic/header,
   fixed-width aligned fields, explicit little-endian encoding, feature flags,
-  and v2 attachment compatibility. Strict semantic corruption validation is
-  tracked as the next step.
+  and v2 attachment compatibility. Strict semantic corruption and payload
+  geometry validation is also **implemented** for open, discovery, and purge.
 
 The original prioritized list below is retained so unfinished portions remain
 visible rather than disappearing when an item is partially completed.

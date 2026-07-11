@@ -19,6 +19,7 @@ import hashlib
 import builtins
 from contextlib import contextmanager
 import glob
+import math
 import os
 import pickle
 import tempfile
@@ -590,7 +591,7 @@ def _normalize_cpu_mirror(
 def _normalize_size(
     shape: tuple[int, ...], dtype: np.dtype, size: int | None
 ) -> int:
-    expected = int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
+    expected = math.prod(shape) * dtype.itemsize
     if size is None:
         return expected
     if int(size) != expected:
@@ -607,10 +608,138 @@ def _dtype_to_code(dtype: np.dtype) -> int:
 
 
 def _code_to_dtype(code: float) -> np.dtype:
+    if not np.isfinite(code) or float(code) != int(code):
+        raise ValueError(f"invalid dtype code in metadata: {code}")
     index = int(code)
     if index < 0 or index >= len(DTYPE_TABLE):
         raise ValueError(f"invalid dtype code in metadata: {code}")
     return DTYPE_TABLE[index]
+
+
+def _metadata_integer(value, field: str) -> int:
+    """Decode an integer metadata field without accepting truncation."""
+    try:
+        numeric = float(value)
+        result = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"invalid {field} in metadata: {value!r}") from exc
+    if not np.isfinite(numeric) or numeric != result:
+        raise ValueError(f"invalid {field} in metadata: {value!r}")
+    return result
+
+
+def _decode_metadata_header(
+    metadata: _MetadataView,
+    metadata_shm: shared_memory.SharedMemory,
+    *,
+    expected_name: str,
+) -> dict[str, Any]:
+    """Validate metadata fields and return a normalized stream description."""
+    if metadata.layout_version == METADATA_VERSION:
+        if len(metadata_shm.buf) != METADATA_TOTAL_BYTES:
+            raise ValueError(
+                f"invalid metadata segment size: expected "
+                f"{METADATA_TOTAL_BYTES}, got {len(metadata_shm.buf)}"
+            )
+        flags = int(metadata._v3["flags"])
+        known_flags = (
+            METADATA_FLAG_GPU_ENABLED | METADATA_FLAG_CPU_MIRROR_ENABLED
+        )
+        if flags & ~known_flags:
+            raise ValueError(f"unsupported metadata flags: 0x{flags:x}")
+        if any(bytes(metadata._v3["reserved"])):
+            raise ValueError("reserved metadata bytes must be zero")
+
+    stored_name = _read_stream_name(metadata_shm)
+    if metadata.layout_version == METADATA_VERSION and stored_name is None:
+        raise ValueError("version 3 metadata does not contain a stream name")
+    if stored_name is not None and stored_name != expected_name:
+        raise ValueError(
+            f"metadata name mismatch: expected {expected_name!r}, "
+            f"found {stored_name!r}"
+        )
+
+    dtype = _code_to_dtype(metadata[METADATA_INDEX_DTYPE])
+    ndim = _metadata_integer(metadata[METADATA_INDEX_NDIM], "ndim")
+    max_ndim = METADATA_SIZE - METADATA_INDEX_SHAPE_START
+    if ndim <= 0 or ndim > max_ndim:
+        raise ValueError(f"invalid ndim in metadata: {ndim}")
+    shape = tuple(
+        _metadata_integer(
+            metadata[METADATA_INDEX_SHAPE_START + index],
+            f"shape[{index}]",
+        )
+        for index in range(ndim)
+    )
+    if any(axis <= 0 for axis in shape):
+        raise ValueError(f"invalid shape in metadata: {shape}")
+    if metadata.layout_version == METADATA_VERSION:
+        unused_shape = metadata._v3["shape"][ndim:]
+        if np.any(unused_shape != 0):
+            raise ValueError("unused shape entries in metadata must be zero")
+
+    size = _metadata_integer(metadata[METADATA_INDEX_SIZE], "size")
+    expected_size = math.prod(shape) * dtype.itemsize
+    if size != expected_size:
+        raise ValueError(
+            f"metadata size does not match shape and dtype: "
+            f"expected {expected_size}, got {size}"
+        )
+
+    gpu_raw = _metadata_integer(
+        metadata[METADATA_INDEX_GPU_ENABLED], "gpu_enabled"
+    )
+    mirror_raw = _metadata_integer(
+        metadata[METADATA_INDEX_CPU_MIRROR_ENABLED], "cpu_mirror"
+    )
+    if gpu_raw not in (0, 1) or mirror_raw not in (0, 1):
+        raise ValueError("metadata boolean fields must be zero or one")
+    gpu_enabled = bool(gpu_raw)
+    cpu_mirror = bool(mirror_raw)
+    device_index = _metadata_integer(
+        metadata[METADATA_INDEX_DEVICE_INDEX], "device_index"
+    )
+    if gpu_enabled and device_index < 0:
+        raise ValueError("GPU metadata requires a non-negative device index")
+    if not gpu_enabled and device_index != -1:
+        raise ValueError("CPU metadata requires device_index=-1")
+    if not gpu_enabled and not cpu_mirror:
+        raise ValueError("CPU metadata requires its shared payload")
+
+    creator_pid = _metadata_integer(
+        metadata[METADATA_INDEX_CREATOR_PID], "creator_pid"
+    )
+    if creator_pid <= 0:
+        raise ValueError(f"invalid creator_pid in metadata: {creator_pid}")
+    count = _metadata_integer(metadata[METADATA_INDEX_COUNT], "count")
+    if count < 0:
+        raise ValueError(f"invalid count in metadata: {count}")
+    _metadata_integer(
+        metadata[METADATA_INDEX_WRITE_SEQUENCE], "write_sequence"
+    )
+    write_time = float(metadata[METADATA_INDEX_WRITE_TIME])
+    if not np.isfinite(write_time) or write_time < 0:
+        raise ValueError(f"invalid write_time in metadata: {write_time}")
+    lock_owner = _metadata_integer(
+        metadata[METADATA_INDEX_LOCK_OWNER_PID], "lock_owner_pid"
+    )
+    lock_depth = _metadata_integer(
+        metadata[METADATA_INDEX_LOCK_DEPTH], "lock_depth"
+    )
+    if lock_owner < 0 or lock_depth < 0:
+        raise ValueError("lock metadata cannot be negative")
+    if (lock_owner == 0) != (lock_depth == 0):
+        raise ValueError("lock owner and depth metadata are inconsistent")
+
+    return {
+        "dtype": dtype,
+        "shape": shape,
+        "size": size,
+        "gpu_enabled": gpu_enabled,
+        "device_index": device_index,
+        "creator_pid": creator_pid,
+        "cpu_mirror": cpu_mirror,
+    }
 
 
 def _normalize_gpu_device(gpu_device: str | int | None) -> Any | None:
@@ -858,15 +987,11 @@ def _validated_stream_name_for_base(base: str) -> str | None:
     try:
         if len(meta_shm.buf) < METADATA_TOTAL_BYTES:
             return None
-        metadata = _MetadataView(meta_shm.buf)
-        if metadata.layout_version not in (
-            LEGACY_METADATA_VERSION,
-            METADATA_VERSION,
-        ):
-            return None
         stream_name = _read_stream_name(meta_shm)
         if stream_name is None or _segment_base_name(stream_name) != base:
             return None
+        metadata = _MetadataView(meta_shm.buf)
+        _decode_metadata_header(metadata, meta_shm, expected_name=stream_name)
         return stream_name
     except (TypeError, ValueError, BufferError):
         return None
@@ -1368,19 +1493,20 @@ class SharedMemory:
                 f"{name!r} does not contain a supported pyshmem metadata block"
             ) from exc
 
-        dtype = _code_to_dtype(metadata[METADATA_INDEX_DTYPE])
-        ndim = int(metadata[METADATA_INDEX_NDIM])
-        shape = tuple(
-            int(metadata[METADATA_INDEX_SHAPE_START + index])
-            for index in range(ndim)
-        )
-        size = int(metadata[METADATA_INDEX_SIZE])
-        gpu_enabled = bool(int(metadata[METADATA_INDEX_GPU_ENABLED]))
-        device_index = int(metadata[METADATA_INDEX_DEVICE_INDEX])
-        creator_pid = int(metadata[METADATA_INDEX_CREATOR_PID])
-        cpu_mirror_enabled = bool(
-            int(metadata[METADATA_INDEX_CPU_MIRROR_ENABLED])
-        )
+        try:
+            decoded = _decode_metadata_header(
+                metadata, metadata_shm, expected_name=name
+            )
+        except ValueError:
+            metadata_shm.close()
+            raise
+        dtype = decoded["dtype"]
+        shape = decoded["shape"]
+        size = decoded["size"]
+        gpu_enabled = decoded["gpu_enabled"]
+        device_index = decoded["device_index"]
+        creator_pid = decoded["creator_pid"]
+        cpu_mirror_enabled = decoded["cpu_mirror"]
 
         try:
             data_shm = shared_memory.SharedMemory(name=_data_name(name))
@@ -1388,6 +1514,13 @@ class SharedMemory:
             metadata_shm.close()
             raise _missing_name_error(name) from exc
         _unregister(data_shm)
+        if data_shm.size != size:
+            metadata_shm.close()
+            data_shm.close()
+            raise ValueError(
+                f"data segment size for {name!r} does not match metadata: "
+                f"expected {size}, got {data_shm.size}"
+            )
 
         resolved_gpu = None
         gpu_tensor = None

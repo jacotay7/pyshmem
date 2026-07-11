@@ -24,6 +24,7 @@ Scope: first remediation batch following the critical adopter review
 | Incomplete sdist tests | Done | `MANIFEST.in` includes `tests/conftest.py`; rebuilt archive contains the fixture and all test modules. |
 | Obsolete former-name distributions | Done | Tracked `dist-release/pyshare-1.0.0*` artifacts removed. |
 | Persistent metadata representation | Done: format foundation | New streams use a documented v3 256-byte little-endian header with magic, feature flags, aligned fixed-width integer counters and dimensions. Readers retain v2 compatibility. Native acquire/release atomics remain open. |
+| Metadata corruption validation | Done | Open, discovery, and purge validate header/segment length, flags, reserved bytes, stored name, dtype, dimensions, shape, byte-size product, CPU/GPU rules, creator and lock fields, timestamps, unused dimensions, and actual payload segment size before mapping. |
 
 ## Verification record
 
@@ -49,9 +50,9 @@ precisely isolating that lifecycle warning remains open.
 1. Define and enforce the interprocess memory model. Replace `float64` metadata
    counters with fixed-width integers and use acquire/release-capable atomic
    operations or a native synchronization layer.
-2. Complete corruption validation for the documented v3 format. Magic,
-   endianness, alignment, feature flags, and v2 compatibility are implemented;
-   semantic field and segment-geometry validation is the next step.
+2. Extend format validation only when new fields/features are introduced. The
+   current v3 semantic fields and segment geometry are validated; checksums or
+   authenticated metadata remain optional future hardening.
 3. Resolve unlink/recreate behavior while old handles remain open, including
    lock-inode generation and stale-handle semantics.
 4. Replace or tightly isolate the pickled CUDA reduction trust boundary and
