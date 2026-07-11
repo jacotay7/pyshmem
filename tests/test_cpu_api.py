@@ -1585,3 +1585,67 @@ def test_last_close_releases_per_name_lock_file_descriptor(shm_name):
     assert state.reference_count == 0
     assert state.file_handle.closed
     assert state.path not in pyshmem_shared._THREAD_LOCKS
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="inode generation semantics require POSIX",
+)
+def test_refresh_if_stale_rebinds_new_inode(tmp_path):
+    path = str(tmp_path / "sub" / "probe.lock")
+    state = pyshmem_shared._SharedLockState(path)
+    original_inode = state.inode
+    try:
+        # Unchanged inode: refresh is a no-op and keeps the same handle.
+        handle_before = state.file_handle
+        state.refresh_if_stale()
+        assert state.file_handle is handle_before
+        assert state.inode == original_inode
+
+        # Simulate an unlink()/recreate: a new inode now lives at the path.
+        os.unlink(path)
+        fresh_handle, fresh_inode = pyshmem_shared._open_lock_file(path)
+        try:
+            assert fresh_inode != original_inode
+            state.refresh_if_stale()
+            assert state.file_handle is not handle_before
+            assert handle_before.closed
+            assert state.inode == fresh_inode
+            assert state.inode == os.stat(path).st_ino
+        finally:
+            fresh_handle.close()
+    finally:
+        state.file_handle.close()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="inode generation semantics require POSIX",
+)
+def test_acquire_reconverges_after_unlink_recreate(shm_name):
+    # Handle A keeps the original lock inode open, as a live process would.
+    a = pyshmem.create(shm_name, shape=(1,), dtype=np.float32)
+    a.acquire()
+    a.release()
+    lock_path = a._lock_state.path
+    original_inode = a._lock_state.inode
+    assert os.stat(lock_path).st_ino == original_inode
+
+    # Model another process destroying and recreating the stream: the lock
+    # file is unlinked and a new inode appears at the same pathname.
+    os.unlink(lock_path)
+    fresh_handle, fresh_inode = pyshmem_shared._open_lock_file(lock_path)
+    try:
+        assert fresh_inode != original_inode
+        # A's handle is now stale.  Acquiring must rebind it to the current
+        # inode so A and the other process serialise on the same lock file.
+        a.acquire()
+        try:
+            assert a._lock_state.inode == fresh_inode
+            assert a._lock_state.inode == os.stat(lock_path).st_ino
+        finally:
+            a.release()
+    finally:
+        fresh_handle.close()
+        a.close()
+        pyshmem.unlink(shm_name)

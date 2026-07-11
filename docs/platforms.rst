@@ -78,3 +78,14 @@ Lock files are small and survive process exits (they are cleaned up by
 :func:`pyshmem.unlink`).  ``portalocker`` uses OS-level file locks that are
 released automatically when a process crashes, so stale locks do not block
 subsequent writers.
+
+Unlink/recreate with live handles
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:func:`pyshmem.unlink` removes the lock file, but a process that still holds a
+handle keeps the original inode open.  If the stream is then recreated, a new
+inode appears at the same pathname.  To keep every process serialising on the
+same lock, pyshmem records the lock file's inode and, on each lock acquisition,
+rebinds a handle whose pathname now resolves to a different inode.  A recreated
+stream therefore converges on one shared lock object rather than splitting into
+independent locks per handle generation.

@@ -26,6 +26,7 @@ Scope: first remediation batch following the critical adopter review
 | Persistent metadata representation | Done: format foundation | New streams use a documented v3 256-byte little-endian header with magic, feature flags, aligned fixed-width integer counters and dimensions. Readers retain v2 compatibility. Native acquire/release atomics remain open. |
 | Metadata corruption validation | Done | Open, discovery, and purge validate header/segment length, flags, reserved bytes, stored name, dtype, dimensions, shape, byte-size product, CPU/GPU rules, creator and lock fields, timestamps, unused dimensions, and actual payload segment size before mapping. |
 | Interprocess memory model specified | Done: documented model | `docs/format.rst` now specifies encoding, alignment, the seqlock protocol, what pyshmem relies on (single-writer serialization, aligned 8-byte counter atomicity, program-order publication), what it does *not* provide (no hardware barriers), and the validated architectures (x86-64, aarch64). Platform docs and README narrow correctness claims accordingly. A regression test enforces 8-byte alignment of the hot-path counters. A native acquire/release atomic backend remains the open enforcement piece. |
+| Unlink/recreate lock-inode generation | Done | `_SharedLockState` records the lock file's inode and rebinds a stale handle on each acquire when the pathname resolves to a new inode, so a stream destroyed and recreated while old handles are live reconverges on one shared lock instead of splitting into per-generation locks. Regression tests cover the refresh mechanism and post-recreate convergence (verified load-bearing against a disabled-refresh baseline); `docs/platforms.rst` documents the semantics. |
 
 ## Verification record
 
@@ -55,8 +56,10 @@ precisely isolating that lifecycle warning remains open.
 2. Extend format validation only when new fields/features are introduced. The
    current v3 semantic fields and segment geometry are validated; checksums or
    authenticated metadata remain optional future hardening.
-3. Resolve unlink/recreate behavior while old handles remain open, including
-   lock-inode generation and stale-handle semantics.
+3. Resolve remaining unlink/recreate edge cases while old handles remain open.
+   Lock-inode generation and stale-handle reconvergence are handled; data and
+   metadata segment recreation while consumers hold prior mappings still needs
+   explicit documentation and coverage.
 4. Replace or tightly isolate the pickled CUDA reduction trust boundary and
    private CPython/PyTorch APIs.
 5. Expand fault testing: malformed metadata, fork inheritance, CUDA failure

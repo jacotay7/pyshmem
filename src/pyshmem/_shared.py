@@ -178,15 +178,44 @@ _GPU_OPEN_LOCKS_GUARD = threading.Lock()
 _GPU_OPEN_LOCKS: dict[str, threading.Lock] = {}
 
 
+def _open_lock_file(path: str) -> tuple[Any, int]:
+    """Open (creating if needed) a lock file and return it with its inode."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    handle = builtins.open(path, "a+b")
+    return handle, os.fstat(handle.fileno()).st_ino
+
+
 class _SharedLockState:
     def __init__(self, path: str) -> None:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
         self.path = path
         self.thread_lock = threading.RLock()
-        self.file_handle = builtins.open(path, "a+b")
+        self.file_handle, self.inode = _open_lock_file(path)
         self.owner_thread_id: int | None = None
         self.depth = 0
         self.reference_count = 0
+
+    def refresh_if_stale(self) -> None:
+        """Reopen the lock file if its pathname now points to a new inode.
+
+        ``unlink()`` removes the lock file, but a live handle in this process
+        keeps the original inode open.  If the stream is then recreated, other
+        processes open a brand-new inode at the same path.  Without this check
+        the two would lock different inodes and stop serialising.  Callers must
+        hold ``thread_lock`` and must not already own the file lock (depth 0),
+        so no in-process holder is using the handle being replaced.
+        """
+        try:
+            current_inode = os.stat(self.path).st_ino
+        except FileNotFoundError:
+            current_inode = None
+        if current_inode == self.inode:
+            return
+        old_handle = self.file_handle
+        self.file_handle, self.inode = _open_lock_file(self.path)
+        try:
+            old_handle.close()
+        except Exception:
+            pass
 
 
 class InconsistentStreamError(RuntimeError):
@@ -1298,6 +1327,10 @@ class SharedMemory:
             self._lock_metadata_on_acquire()
             return
 
+        # We hold thread_lock and own no file lock (depth 0), so it is safe to
+        # rebind a stale handle left behind by an unlink()/recreate cycle
+        # before we take the cross-process lock.
+        self._lock_state.refresh_if_stale()
         try:
             _acquire_file_lock(
                 self._lock_state.file_handle,

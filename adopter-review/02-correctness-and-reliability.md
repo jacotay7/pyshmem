@@ -166,5 +166,10 @@ PyTorch reduction format makes this unavoidable.
 - SHA-1 truncated to 14 hex characters gives only a 56-bit name space and has no
   collision detection against the stored original name.
 - Removing a lock pathname while old handles still have its inode open can let
-  a recreated pathname refer to a different lock object. Lifecycle rules around
-  unlink/recreate with live handles need an explicit design and tests.
+  a recreated pathname refer to a different lock object. **Resolved for the lock
+  file:** `_SharedLockState` records the lock inode and rebinds a stale handle
+  on each acquire when the pathname resolves to a new inode, so an
+  unlink/recreate cycle reconverges on one shared lock. Regression tests cover
+  the refresh mechanism and post-recreate convergence, and `docs/platforms.rst`
+  documents the semantics. Recreating the data/metadata segments while consumers
+  hold prior mappings still needs explicit lifecycle documentation and tests.
