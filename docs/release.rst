@@ -11,8 +11,11 @@ It performs two phases:
 
 - build source and wheel distributions
 - run ``twine check`` before publishing to PyPI
+- install the exact built wheel on the minimum and newest supported Python
+  versions and run the non-benchmark CPU suite
 
-The publish job uses GitHub's OIDC-based trusted publishing flow through the
+Only after both wheel-test jobs pass can the publish job use GitHub's
+OIDC-based trusted publishing flow through the
 ``pypa/gh-action-pypi-publish`` action.
 
 Read the Docs
@@ -28,6 +31,8 @@ Before tagging a release
 ------------------------
 
 - run the test suite
+- update ``CHANGELOG.md`` and remove changes from its Unreleased section as
+  appropriate
 - ensure the README and docs reflect the current API
 - verify the project version in ``pyproject.toml``
 - create and publish a GitHub release to trigger the PyPI workflow

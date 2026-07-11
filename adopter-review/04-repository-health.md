@@ -14,7 +14,7 @@ Completed repository-health items from the first batch:
 - a spawned-process IPC benchmark has a CI smoke test and a versioned JSON
   result.
 
-Still open: real GPU CI, type checking, hosted-doc deployment, release gating, and
+Still open: real GPU CI, type checking, hosted-doc deployment, and
 architectural/private-API work. Contributor, security, support/compatibility,
 and changelog policies have now been added.
 
@@ -95,10 +95,9 @@ ordinary in-process classes.
    gate and no `py.typed` marker for consumers.
 6. **Benchmarks never gate regressions.** Hosted smoke tests explicitly disable
    the only rate assertion.
-7. **Release publishing is not gated on CI in the publish workflow.** A GitHub
-   release triggers a fresh build/publish but does not declare a dependency on
-   a specific successful CI artifact or test the built artifact's actual CPU
-   behavior before upload.
+7. **Resolved for CPU:** the publish workflow builds once, then tests that exact
+   wheel on Python 3.9 and 3.13. OIDC upload depends on both jobs. GPU release
+   gating still requires an external CUDA runner.
 8. **Actions are tag-pinned, not commit-pinned.** This is common but weaker for
    supply-chain hardening.
 

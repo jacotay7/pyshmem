@@ -15,6 +15,8 @@ All notable user-facing changes are documented here. The project follows
 - Made `pyproject.toml` package metadata the single version source used by the
   runtime package and documentation.
 - Added Dependabot, CodeQL, and runtime dependency-vulnerability auditing.
+- Gated PyPI publication on CPU tests of the exact wheel artifact under the
+  minimum and newest supported Python versions.
 
 ## 1.0.5
 

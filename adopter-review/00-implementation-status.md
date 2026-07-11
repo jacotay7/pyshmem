@@ -39,6 +39,7 @@ Scope: first remediation batch following the critical adopter review
 | Maintainer and adopter policies | Done | Added contributor workflow, security disclosure instructions, support/platform/API compatibility policy, and a repository changelog; README links all four. CODE_OF_CONDUCT and succession policy are deferred until the project has multiple participants. |
 | Single-source versioning | Done | `pyproject.toml` is the only literal version. The public `__version__` and Sphinx release value use `importlib.metadata`; a test prevents installed metadata/runtime drift. |
 | Dependency/security automation | Done | Dependabot tracks Python and GitHub Actions updates; CI runs strict `pip-audit` against installed runtime dependencies; CodeQL runs on pushes, pull requests, and weekly. Repository-host settings such as secret scanning remain external. |
+| Release artifact gating | Done | The PyPI workflow builds once, validates distributions, then installs and runs the CPU suite against that exact wheel on Python 3.9 and 3.13. OIDC publishing depends on both wheel-test jobs succeeding. |
 
 ## Verification record
 
