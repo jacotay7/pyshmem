@@ -17,6 +17,8 @@ All notable user-facing changes are documented here. The project follows
 - Added Dependabot, CodeQL, and runtime dependency-vulnerability auditing.
 - Gated PyPI publication on CPU tests of the exact wheel artifact under the
   minimum and newest supported Python versions.
+- Reworked README into a concise project, quick-start, installation,
+  performance, license, and contact landing page linked to detailed docs.
 
 ## 1.0.5
 

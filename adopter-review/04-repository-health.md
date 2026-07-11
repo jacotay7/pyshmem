@@ -12,7 +12,9 @@ Completed repository-health items from the first batch:
 - fault, lock-deadline, descriptor-lifecycle, purge-ownership, and GPU sequence
   regression tests were added;
 - a spawned-process IPC benchmark has a CI smoke test and a versioned JSON
-  result.
+  result;
+- README is a concise adopter landing page whose sections link to the detailed
+  Sphinx documentation rather than duplicating it.
 
 Still open: real GPU CI, type checking, hosted-doc deployment, and
 architectural/private-API work. Contributor, security, support/compatibility,

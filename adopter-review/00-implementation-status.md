@@ -43,6 +43,7 @@ surface is Linux and macOS; CUDA support is Linux-only.
 | Single-source versioning | Done | `pyproject.toml` is the only literal version. The public `__version__` and Sphinx release value use `importlib.metadata`; a test prevents installed metadata/runtime drift. |
 | Dependency/security automation | Done | Dependabot tracks Python and GitHub Actions updates; CI runs strict `pip-audit` against installed runtime dependencies; CodeQL runs on pushes, pull requests, and weekly. Repository-host settings such as secret scanning remain external. |
 | Release artifact gating | Done | The PyPI workflow builds once, validates distributions, then installs and runs the CPU suite against that exact wheel on Python 3.9 and 3.13. OIDC publishing depends on both wheel-test jobs succeeding. |
+| README as adopter landing page | Done | Replaced the 462-line duplicated manual with a concise overview, CPU/GPU quick start, installation, reproducible performance summary, and license/contact sections. Each section links to the authoritative detailed docs. |
 
 ## Verification record
 
