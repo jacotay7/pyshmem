@@ -183,6 +183,29 @@ def test_read_new_times_out_when_no_new_write_arrives(shm_name):
     writer.close()
 
 
+def test_readonly_handle_rejects_shared_mutations(shm_name):
+    writer = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    writer.write(np.array([1, 2], dtype=np.float32))
+    reader = pyshmem.open(shm_name, readonly=True)
+    try:
+        assert reader.readonly is True
+        np.testing.assert_array_equal(reader.read(), np.array([1, 2]))
+        for operation in (
+            lambda: reader.write(np.zeros(2, dtype=np.float32)),
+            reader.clear,
+            reader.acquire,
+            lambda: reader.read(safe=False),
+            reader.unlink,
+        ):
+            with pytest.raises(PermissionError, match="read-only"):
+                operation()
+
+        np.testing.assert_array_equal(writer.read(), np.array([1, 2]))
+    finally:
+        reader.close()
+        writer.unlink()
+
+
 def test_read_reports_skipped_capacity_one_publications(shm_name):
     writer = pyshmem.create(shm_name, shape=(1,), dtype=np.int64)
     reader = pyshmem.open(shm_name)

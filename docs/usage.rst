@@ -108,6 +108,34 @@ exited), :func:`~pyshmem.open` falls back to the CPU mirror automatically when
 one exists, and otherwise raises a clear error.  See :doc:`gpu` for the full
 GPU model.
 
+Read-only handles
+-----------------
+
+Pass ``readonly=True`` to :func:`~pyshmem.open` for a consumer that must never
+mutate the stream.  Reads work normally, but every mutating operation raises
+:class:`PermissionError` instead of touching shared state:
+
+.. code-block:: python
+
+   reader = pyshmem.open("my_stream", readonly=True)
+   reader.read()                    # ok — snapshots the latest value
+   reader.write(value)              # raises PermissionError
+   reader.acquire()                 # raises PermissionError
+   reader.read(safe=False)          # raises PermissionError (would expose a
+                                    # mutable zero-copy view)
+
+The guard rejects :meth:`~pyshmem.SharedMemory.write`,
+:meth:`~pyshmem.SharedMemory.write_locked`,
+:meth:`~pyshmem.SharedMemory.clear`,
+:meth:`~pyshmem.SharedMemory.acquire` (and therefore
+:meth:`~pyshmem.SharedMemory.locked`),
+:meth:`~pyshmem.SharedMemory.pinned_buffer`, unsafe
+(``safe=False``) reads, and handle-level
+:meth:`~pyshmem.SharedMemory.unlink`.  It is a per-handle guard, not a
+segment-level protection: other writable handles to the same stream continue to
+publish normally, and ``readonly`` only reflects how *this* handle was opened
+(the owner and any default handles remain writable).
+
 Writing data
 ------------
 

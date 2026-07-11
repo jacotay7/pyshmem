@@ -1316,6 +1316,7 @@ class SharedMemory:
         data_shm: shared_memory.SharedMemory,
         metadata_shm: shared_memory.SharedMemory,
         owner: bool,
+        readonly: bool = False,
         instance_id: bytes | None = None,
         gpu_handle_shm: shared_memory.SharedMemory | None = None,
         gpu_tensor=None,
@@ -1329,6 +1330,7 @@ class SharedMemory:
         self.gpu_enabled = bool(gpu_enabled)
         self.cpu_mirror = bool(cpu_mirror)
         self.owner = bool(owner)
+        self.readonly = bool(readonly)
         self._instance_id = instance_id
         self._data_shm = data_shm
         self._metadata_shm = metadata_shm
@@ -1409,6 +1411,12 @@ class SharedMemory:
             raise RuntimeError(
                 f"cannot {operation} closed shared memory {self.name!r}; "
                 f"reopen it with pyshmem.open({self.name!r})"
+            )
+
+    def _ensure_writable(self, operation: str) -> None:
+        if self.readonly:
+            raise PermissionError(
+                f"cannot {operation} read-only shared memory {self.name!r}"
             )
 
     def _lock_owned_by_current_thread(self) -> bool:
@@ -1661,6 +1669,7 @@ class SharedMemory:
         acquired before the deadline.
         """
         self._ensure_open("acquire")
+        self._ensure_writable("acquire the write lock for")
         deadline = (
             None if timeout is None else time.monotonic() + float(timeout)
         )
@@ -1863,6 +1872,7 @@ class SharedMemory:
         name: str,
         *,
         gpu_device: str | int | bool | None = None,
+        readonly: bool = False,
     ) -> "SharedMemory":
         try:
             metadata_shm = _attach_segment(_metadata_name(name))
@@ -1966,6 +1976,7 @@ class SharedMemory:
             data_shm=data_shm,
             metadata_shm=metadata_shm,
             owner=False,
+            readonly=readonly,
             instance_id=decoded["instance_id"],
             gpu_handle_shm=gpu_handle_shm,
             gpu_tensor=gpu_tensor,
@@ -2015,6 +2026,7 @@ class SharedMemory:
 
     def unlink(self) -> None:
         """Destroy the underlying named shared-memory stream."""
+        self._ensure_writable("unlink")
         had_gpu_tensor = self._gpu_tensor is not None
         self.close()
         # The stream is being destroyed: drop the owner's CUDA tensor too
@@ -2033,6 +2045,7 @@ class SharedMemory:
     def clear(self) -> None:
         """Reset the current payload to zeros and record a new write."""
         self._ensure_open("clear")
+        self._ensure_writable("clear")
         if (
             self.gpu_enabled
             and self._gpu_tensor is None
@@ -2066,6 +2079,7 @@ class SharedMemory:
         belongs to this handle and is released by :meth:`close`.
         """
         self._ensure_open("allocate a pinned buffer for")
+        self._ensure_writable("allocate a pinned write buffer for")
         if self._gpu_tensor is None:
             raise RuntimeError(
                 "pinned_buffer() requires a GPU-attached stream handle"
@@ -2087,6 +2101,7 @@ class SharedMemory:
         accept CUDA tensors on the configured device.
         """
         self._ensure_open("write to")
+        self._ensure_writable("write to")
         tensor = None
         array = None
         if self._gpu_tensor is not None:
@@ -2153,6 +2168,8 @@ class SharedMemory:
         write makes the stream readable again.
         """
         self._ensure_open("read from")
+        if not safe:
+            self._ensure_writable("take an unsafe shared view from")
         if out is not None and (self._gpu_tensor is not None or not safe):
             raise ValueError(
                 "out is supported only for safe CPU reads; pass a NumPy "
@@ -2262,6 +2279,7 @@ class SharedMemory:
         pattern used in high-performance consumers such as shmpipeline.
         """
         self._ensure_open("write to")
+        self._ensure_writable("write to")
         if not self._lock_owned_by_current_thread():
             raise RuntimeError(
                 "write_locked() requires an active 'with shm.locked()' block"
@@ -2386,6 +2404,7 @@ class SharedMemory:
             f"write_time:   {self.write_time}",
             f"write_seq:    {self.write_sequence}",
             f"owner:        {self.owner}",
+            f"readonly:     {self.readonly}",
         ]
         return "\n".join(lines)
 
@@ -2600,7 +2619,10 @@ def create(
 
 
 def open(
-    name: str, *, gpu_device: str | int | bool | None = None
+    name: str,
+    *,
+    gpu_device: str | int | bool | None = None,
+    readonly: bool = False,
 ) -> SharedMemory:
     """Attach to an existing named shared-memory stream.
 
@@ -2612,8 +2634,11 @@ def open(
     been created with ``cpu_mirror=True`` and is the way to consume a GPU
     stream's mirror from a process that also has CUDA available (where the
     default would otherwise attach to the GPU).
+
+    Pass ``readonly=True`` for a consumer handle that rejects writes, clears,
+    write-lock acquisition, unsafe shared views, and handle-level unlink.
     """
-    return SharedMemory._open(name, gpu_device=gpu_device)
+    return SharedMemory._open(name, gpu_device=gpu_device, readonly=readonly)
 
 
 @contextmanager

@@ -65,6 +65,7 @@ shm = pyshmem.open("my_stream")
 shm = pyshmem.open("my_gpu_stream")                 # auto-attaches to its cuda:N
 shm = pyshmem.open("my_gpu_stream", gpu_device="cuda:0")  # explicit (must match)
 shm = pyshmem.open("my_gpu_stream", gpu_device=False)    # CPU-mirror only (no GPU attach; requires cpu_mirror=True)
+shm = pyshmem.open("my_stream", readonly=True)           # consumer handle: mutating ops raise PermissionError
 
 # Discover
 pyshmem.list_streams()    # returns sorted list of user-visible stream names
@@ -120,6 +121,7 @@ pyshmem purge --include-cuda-orphans  # additionally sweep global dead-producer 
 - **`create()`** calls `SharedMemory._create()` which creates segments atomically (with cleanup on failure).
 - **`open()`** calls `SharedMemory._open()` which reads metadata to reconstruct shape/dtype without needing the caller to know them.
 - **`open()` reconstructs the stream as created** (`_resolve_open_target_device`): for a GPU stream it auto-attaches to the stored device (`METADATA_INDEX_DEVICE_INDEX`) even when the caller omits `gpu_device`. If the device can't be attached, it falls back to the CPU mirror when one exists (e.g. the producer exited but `cpu_mirror=True`), and otherwise raises a clear error. An explicit `gpu_device=` is validated against the stored device and, if it can't attach, raises rather than falling back. Passing `gpu_device=False` opts out of attaching the producer's CUDA tensor entirely and reads the host mirror as a NumPy array — the way to consume a GPU stream's mirror from a CUDA-capable process (where the default would auto-attach to the GPU). It requires `cpu_mirror=True` and otherwise raises `ValueError`.
+- **`readonly=True` handles** (`open(..., readonly=True)`): a per-handle guard (`_ensure_writable`) makes every mutating operation raise `PermissionError` — `write`, `write_locked`, `clear`, `acquire`/`locked`, `pinned_buffer`, unsafe (`safe=False`) reads, and handle-level `unlink`. It does not protect the segment: other writable handles to the same stream (and the owner) still publish. `describe()` reports the `readonly` flag.
 - **Resource tracker suppression**: segments are opened through `_attach_segment()`, which passes the public `track=False` on Python 3.13+ (so they are never registered) and otherwise falls back to constructing the segment and calling `_unregister()` (the private `resource_tracker.unregister` reach-in). Either way child process exits don't spuriously warn about leaked shared memory.
 - **Platform**: POSIX only (Linux and macOS). Full Linux support; macOS works but GPU IPC is not tested there. Windows is **not supported** (no POSIX shared-memory persistence / process-shared locks) and is excluded from CI.
 

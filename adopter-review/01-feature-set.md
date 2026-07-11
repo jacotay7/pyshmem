@@ -74,7 +74,6 @@ Other missing data features that potential adopters commonly need:
 - variable-sized messages or a valid-length field;
 - resize/reconfigure/version negotiation;
 - strides/layout metadata and non-contiguous inputs without forced conversion;
-- read-only consumer handles;
 - a public zero-copy writable view/context (the implementation has `_array` and
   a locked unsafe read, but no purpose-built writer view);
 - batched writes or atomic transactions across multiple streams;
@@ -121,7 +120,8 @@ payloads, CUDA handles, and CUDA allocations.
    immutable/snapshot.
 4. A backend-neutral tensor interface using DLPack/array protocols, while
    retaining optimized PyTorch adapters.
-5. Namespaces, read-only opens, creator identity/heartbeat, and scoped cleanup.
+5. Namespaces, creator identity/heartbeat, and scoped cleanup. Read-only opens
+   are now implemented via `open(..., readonly=True)`.
 6. A stable on-memory format specification and backward-compatibility policy.
 7. GPU `out=` support, asynchronous APIs accepting a CUDA stream/event, and
    pinned-host mirror support.

@@ -80,6 +80,27 @@ def test_pinned_buffer_is_reused_and_writable(shm_name):
         shm.unlink()
 
 
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_readonly_gpu_handle_can_snapshot_but_not_mutate(shm_name):
+    writer = pyshmem.create(
+        shm_name, shape=(2,), dtype=np.float32, gpu_device="cuda:0"
+    )
+    writer.write(torch.tensor([1, 2], device="cuda:0", dtype=torch.float32))
+    reader = pyshmem.open(shm_name, readonly=True)
+    try:
+        torch.testing.assert_close(
+            reader.read(),
+            torch.tensor([1, 2], device="cuda:0", dtype=torch.float32),
+        )
+        with pytest.raises(PermissionError, match="read-only"):
+            reader.write(torch.zeros(2, device="cuda:0"))
+        with pytest.raises(PermissionError, match="read-only"):
+            reader.pinned_buffer()
+    finally:
+        reader.close()
+        writer.unlink()
+
+
 def _run_python_child(code: str) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     pythonpath = env.get("PYTHONPATH")

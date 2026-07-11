@@ -39,6 +39,10 @@ Detailed evidence is in [Implementation status](00-implementation-status.md).
   ``libatomic`` acquire/release operations elsewhere, or a process-shared
   OS-lock barrier fallback. Tests force the native and fallback paths.
 
+- P2.6: **read-only consumer handles implemented** — `open(..., readonly=True)`
+  rejects every mutating operation on that handle with `PermissionError`.
+  Namespaces, heartbeat/staleness metadata, and a scoped registry remain.
+
 The original prioritized list below is retained so unfinished portions remain
 visible rather than disappearing when an item is partially completed.
 

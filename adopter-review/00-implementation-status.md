@@ -48,12 +48,13 @@ surface is Linux and macOS; CUDA support is Linux-only.
 | Reusable pinned GPU staging | Done | `SharedMemory.pinned_buffer()` lazily allocates and reuses a correctly shaped/dtyped page-locked CPU tensor, writable through a zero-copy NumPy view. Regression coverage verifies reuse and round-trip correctness; repeated 4 MB writes measured median 149.67 us versus 171.70 us pageable. |
 | Stream-local CUDA synchronization | Done | GPU read/write/clear records and synchronizes an event on the active CUDA stream instead of calling whole-device `torch.cuda.synchronize`. Publication remains synchronous and safe. A regression test forbids the global API while round-trip and clear operations succeed. Fully async cross-process publication remains open. |
 | Capability-driven dtype support | Done | GPU dtype support is derived from attributes exposed by the installed PyTorch instead of a stale fixed subset. The persistent table was backward-compatibly extended with bool and complex64/128. CPU and real-CUDA tests cover bool/complex and torch 2.10 unsigned 16/32/64-bit round trips. |
+| Read-only consumer handles | Done | `open(..., readonly=True)` returns a per-handle guarded consumer: `write`, `write_locked`, `clear`, `acquire`/`locked`, `pinned_buffer`, unsafe (`safe=False`) reads, and handle-level `unlink` raise `PermissionError`, while reads snapshot normally. The guard is per handle, not segment-level, so other writable handles and the owner keep publishing; `describe()` reports the flag. CPU and real-CUDA (RTX 5090) regression tests cover snapshot-then-reject behaviour. |
 
 ## Verification record
 
 ```text
-pytest tests -q -ra                 129 passed in 11.74s
-pytest ... --cov-branch             123 passed; 81% total coverage
+pytest tests -q                     173 passed in 19.41s (RTX 5090)
+pytest tests/test_cpu_api.py -q      112 passed in 7.88s
 ruff check .                        passed
 ruff format --check .               passed
 sphinx-build -W                     passed

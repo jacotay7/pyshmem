@@ -27,6 +27,9 @@ All notable user-facing changes are documented here. The project follows
   synchronous GPU reads, writes, and clears.
 - Made GPU dtype support reflect installed PyTorch capabilities and added stable
   bool/complex codes to the CPU/persistent format.
+- Added `pyshmem.open(..., readonly=True)` for consumer handles that reject
+  writes, clears, write-lock acquisition, unsafe zero-copy views, pinned-buffer
+  allocation, and handle-level unlink with `PermissionError`.
 
 ## 1.0.5
 
