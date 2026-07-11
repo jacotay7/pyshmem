@@ -998,6 +998,41 @@ def test_producer_alive_false_after_creator_exits(shm_name):
         reader.unlink()
 
 
+def test_dlpack_cpu_snapshot_roundtrip_and_independence(shm_name):
+    shm = pyshmem.create(shm_name, shape=(3,), dtype=np.float32)
+    try:
+        shm.write(np.array([1, 2, 3], dtype=np.float32))
+        assert tuple(shm.__dlpack_device__()) == (1, 0)  # kDLCPU
+        view = np.from_dlpack(shm)
+        np.testing.assert_array_equal(view, [1, 2, 3])
+        # A DLPack export is a consistent snapshot, not a live view, so a later
+        # write must not mutate the already-exported array.
+        shm.write(np.array([9, 9, 9], dtype=np.float32))
+        np.testing.assert_array_equal(view, [1, 2, 3])
+    finally:
+        shm.unlink()
+
+
+def test_dlpack_export_allowed_on_readonly_handle(shm_name):
+    writer = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    writer.write(np.array([5, 6], dtype=np.float32))
+    reader = pyshmem.open(shm_name, readonly=True)
+    try:
+        np.testing.assert_array_equal(np.from_dlpack(reader), [5, 6])
+    finally:
+        reader.close()
+        writer.unlink()
+
+
+def test_dlpack_on_closed_handle_raises(shm_name):
+    shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    shm.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        shm.__dlpack__()
+    with pytest.raises(RuntimeError, match="closed"):
+        shm.__dlpack_device__()
+
+
 def test_open_rejects_data_segment_size_mismatch(shm_name):
     from multiprocessing import shared_memory
 

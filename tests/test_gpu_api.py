@@ -101,6 +101,34 @@ def test_readonly_gpu_handle_can_snapshot_but_not_mutate(shm_name):
         writer.unlink()
 
 
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_dlpack_gpu_roundtrips_on_device(shm_name):
+    shm = pyshmem.create(
+        shm_name, shape=(3,), dtype=np.float32, gpu_device="cuda:0"
+    )
+    try:
+        shm.write(
+            torch.tensor([4, 5, 6], device="cuda:0", dtype=torch.float32)
+        )
+        device_type, device_id = shm.__dlpack_device__()
+        assert int(device_type) == 2  # kDLCUDA
+        assert device_id == 0
+        exported = torch.from_dlpack(shm)
+        assert exported.device.type == "cuda"
+        torch.testing.assert_close(
+            exported,
+            torch.tensor([4, 5, 6], device="cuda:0", dtype=torch.float32),
+        )
+        # Snapshot semantics: a later write does not mutate the export.
+        shm.write(torch.zeros(3, device="cuda:0", dtype=torch.float32))
+        torch.testing.assert_close(
+            exported,
+            torch.tensor([4, 5, 6], device="cuda:0", dtype=torch.float32),
+        )
+    finally:
+        shm.unlink()
+
+
 def _run_python_child(code: str) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     pythonpath = env.get("PYTHONPATH")

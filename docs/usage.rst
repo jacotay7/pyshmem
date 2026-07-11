@@ -441,6 +441,32 @@ identically-configured stream from such a dict:
 This is useful for serialising pipeline configurations to YAML or JSON and
 reconstructing the streams from them at startup.
 
+Framework interop (DLPack)
+--------------------------
+
+A :class:`~pyshmem.SharedMemory` handle implements the DLPack protocol
+(``__dlpack__`` / ``__dlpack_device__``), so any framework that consumes DLPack
+can read a stream directly — no pyshmem-specific code and no framework
+lock-in:
+
+.. code-block:: python
+
+   import numpy as np
+   import torch
+
+   frame = np.from_dlpack(shm)      # CPU stream  -> numpy.ndarray
+   frame = torch.from_dlpack(shm)   # GPU stream  -> torch.Tensor on its device
+   # cupy.from_dlpack(shm), jax.dlpack.from_dlpack(shm), ... also work
+
+The export is a **seqlock-consistent snapshot** — exactly what :meth:`read`
+returns — not a live view of shared memory.  It is therefore safe on read-only
+handles and free of torn reads, and the snapshot's buffer is owned by the
+capsule, so it outlives the handle it came from.  ``__dlpack_device__`` reports
+``(kDLCPU, 0)`` for CPU streams and the attached CUDA device for GPU streams.
+
+For a genuine zero-copy *live* view of the shared buffer (valid only while you
+hold the lock), use ``read(safe=False)`` instead.
+
 Lifecycle
 ---------
 

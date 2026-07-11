@@ -2564,6 +2564,44 @@ class SharedMemory:
             cpu_mirror=config.get("cpu_mirror"),
         )
 
+    def __dlpack_device__(self) -> tuple[int, int]:
+        """Return the DLPack ``(device_type, device_id)`` of this stream.
+
+        ``(1, 0)`` for CPU streams (``kDLCPU``); the attached CUDA tensor's own
+        device for GPU streams. Consumers call this before :meth:`__dlpack__`.
+        """
+        self._ensure_open("read the DLPack device of")
+        if self._gpu_tensor is not None:
+            return self._gpu_tensor.__dlpack_device__()
+        return (1, 0)  # kDLCPU
+
+    def __dlpack__(self, *, stream=None, **kwargs):
+        """Export a consistent snapshot as a DLPack capsule.
+
+        Makes the stream directly consumable by any framework that implements
+        the DLPack protocol, e.g. ``np.from_dlpack(shm)``,
+        ``torch.from_dlpack(shm)``, ``cupy.from_dlpack(shm)`` — no
+        pyshmem-specific code and no framework lock-in.
+
+        The capsule wraps a seqlock-consistent snapshot (exactly what
+        :meth:`read` returns), **not** a live view of shared memory: it is
+        therefore safe for read-only handles and free of torn reads, and the
+        snapshot's buffer is owned by the capsule so it outlives this handle.
+        For a genuine zero-copy live view (valid only under a held lock) use
+        ``read(safe=False)`` instead.
+        """
+        self._ensure_open("export DLPack from")
+        snapshot = self.read()
+        dlpack_kwargs = dict(kwargs)
+        if self._gpu_tensor is not None and stream is not None:
+            dlpack_kwargs["stream"] = stream
+        try:
+            return snapshot.__dlpack__(**dlpack_kwargs)
+        except TypeError:
+            # Older array __dlpack__ implementations reject the newer optional
+            # protocol kwargs; retry with the minimal signature.
+            return snapshot.__dlpack__()
+
     def __enter__(self) -> "SharedMemory":
         return self
 

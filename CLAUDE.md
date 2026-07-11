@@ -102,6 +102,10 @@ shm.is_stale(max_age)      # True if latest write older than max_age seconds
 shm.producer_alive()       # best-effort single-host PID liveness of creator
 shm.creator_pid            # PID that created the stream
 
+# Framework interop (DLPack) — consistent snapshot, not a live view
+np.from_dlpack(shm)        # CPU -> numpy; torch.from_dlpack(shm) GPU -> tensor
+shm.__dlpack_device__()    # (kDLCPU,0) for CPU, attached CUDA device for GPU
+
 # Lifecycle
 shm.close()               # detach this handle; stream persists
 shm.unlink()              # destroy the stream entirely

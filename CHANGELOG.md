@@ -40,6 +40,10 @@ All notable user-facing changes are documented here. The project follows
 - Added producer-liveness and staleness helpers: `SharedMemory.age`,
   `is_stale(max_age)`, `producer_alive()`, and `creator_pid`, plus new
   `describe()` lines. No producer-side heartbeat thread is required.
+- Added DLPack support (`__dlpack__` / `__dlpack_device__`) so a handle is
+  directly consumable by `np.from_dlpack`, `torch.from_dlpack`,
+  `cupy.from_dlpack`, etc. The export is a seqlock-consistent snapshot (safe on
+  read-only handles), not a live view.
 
 ## 1.0.5
 
