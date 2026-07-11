@@ -1340,6 +1340,8 @@ class SharedMemory:
         self._gpu_tensor = gpu_tensor
         self._torch_dtype = torch_dtype
         self._last_seen_count = int(self._metadata[METADATA_INDEX_COUNT])
+        self._last_missed_writes = 0
+        self._total_missed_writes = 0
         self._lock_state = _lock_state(name)
         self._lock_state_released = False
         self._closed = False
@@ -1364,6 +1366,30 @@ class SharedMemory:
         """Return the number of completed writes recorded on the stream."""
         self._ensure_open("read count from")
         return self._metadata.load_count_acquire()
+
+    @property
+    def last_read_count(self) -> int:
+        """Return the count captured by the last successful read."""
+        self._ensure_open("read last_read_count from")
+        return self._last_seen_count
+
+    @property
+    def missed_writes(self) -> int:
+        """Return publications skipped by the last successful read."""
+        self._ensure_open("read missed_writes from")
+        return self._last_missed_writes
+
+    @property
+    def total_missed_writes(self) -> int:
+        """Return all publications this handle has observed as skipped."""
+        self._ensure_open("read total_missed_writes from")
+        return self._total_missed_writes
+
+    def _record_read(self, count: int) -> None:
+        missed = max(0, int(count) - self._last_seen_count - 1)
+        self._last_missed_writes = missed
+        self._total_missed_writes += missed
+        self._last_seen_count = int(count)
 
     @property
     def write_time(self) -> float:
@@ -1560,7 +1586,7 @@ class SharedMemory:
                 timeout=remaining, poll_interval=poll_interval
             )
             if start_sequence == end_sequence:
-                self._last_seen_count = end_count
+                self._record_read(end_count)
                 return result
 
     def _read_consistent_gpu(
@@ -1589,7 +1615,7 @@ class SharedMemory:
                     timeout=remaining, poll_interval=poll_interval
                 )
                 if start_sequence == end_sequence:
-                    self._last_seen_count = end_count
+                    self._record_read(end_count)
                     result = torch.as_tensor(
                         cpu_snapshot,
                         dtype=self._torch_dtype,
@@ -1618,7 +1644,7 @@ class SharedMemory:
                 timeout=remaining, poll_interval=poll_interval
             )
             if start_sequence == end_sequence:
-                self._last_seen_count = end_count
+                self._record_read(end_count)
                 return result
 
     def acquire(
@@ -2114,7 +2140,7 @@ class SharedMemory:
                 raise RuntimeError(
                     "safe=False requires an active 'with shm.locked()' block"
                 )
-            self._last_seen_count = self.count
+            self._record_read(self.count)
             if self._gpu_tensor is not None:
                 return self._gpu_tensor
             if self.gpu_enabled and not self.cpu_mirror:

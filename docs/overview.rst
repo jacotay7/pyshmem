@@ -13,10 +13,17 @@ CPU/GPU branching logic.
 Core concepts
 -------------
 
-A **stream** is the only primitive pyshmem exposes.  It is a named slot in
-shared memory with a fixed shape, dtype, and storage backend.  Streams persist
+A **stream** is the only primitive pyshmem exposes. It is a capacity-one,
+latest-value exchange: each write replaces the prior payload; it is not a
+queue and does not apply backpressure. It is a named slot in shared memory with
+a fixed shape, dtype, and storage backend. Streams persist
 across process exits on POSIX systems and can be attached by any process that
 knows the name.
+
+Every successful write increments ``count``. After a read, the handle's
+``last_read_count``, ``missed_writes``, and ``total_missed_writes`` properties
+make skipped intermediate publications observable. Applications that must
+consume every item need a queue or ring buffer instead.
 
 Each stream is backed by up to three POSIX shared-memory segments:
 

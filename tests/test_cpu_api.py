@@ -178,6 +178,28 @@ def test_read_new_times_out_when_no_new_write_arrives(shm_name):
     writer.close()
 
 
+def test_read_reports_skipped_capacity_one_publications(shm_name):
+    writer = pyshmem.create(shm_name, shape=(1,), dtype=np.int64)
+    reader = pyshmem.open(shm_name)
+
+    for value in range(1, 4):
+        writer.write(np.array([value], dtype=np.int64))
+
+    np.testing.assert_array_equal(reader.read(), np.array([3]))
+    assert reader.last_read_count == 3
+    assert reader.missed_writes == 2
+    assert reader.total_missed_writes == 2
+
+    writer.write(np.array([4], dtype=np.int64))
+    np.testing.assert_array_equal(reader.read(), np.array([4]))
+    assert reader.last_read_count == 4
+    assert reader.missed_writes == 0
+    assert reader.total_missed_writes == 2
+
+    reader.close()
+    writer.close()
+
+
 def test_safe_reads_stay_consistent_during_concurrent_writes(shm_name):
     writer = pyshmem.create(shm_name, shape=(32, 32), dtype=np.float32)
     reader = pyshmem.open(shm_name)

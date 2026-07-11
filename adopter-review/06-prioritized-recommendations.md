@@ -62,8 +62,9 @@ visible rather than disappearing when an item is partially completed.
 
 ## P1: needed for a credible 1.x adoption story
 
-1. Rename/position the existing primitive as `LatestValue`/`SharedTensor`, or
-   implement capacity-N ring-buffer streams with missed-item reporting.
+1. **Completed for the existing primitive:** position it as a capacity-one
+   latest-value exchange and report per-handle missed publications. A distinct
+   capacity-N ring buffer remains an optional future product.
 2. Publish a memory-format and compatibility specification using fixed-width
    integer fields, a magic number, endianness, feature bits, and atomic ordering.
 3. Replace or isolate private CPython/PyTorch dependencies; use public

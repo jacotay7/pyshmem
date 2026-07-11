@@ -188,6 +188,14 @@ raised.  Omit ``timeout`` (or set it to ``None``) to block indefinitely.
 ``read_new`` correctly skips polling while a write is in progress (odd
 ``write_sequence``), so it never returns a partial write.
 
+Streams retain only the latest payload. If several writes occur between reads,
+intermediate payloads are overwritten rather than queued. After every
+successful ``read`` or ``read_new``, inspect ``reader.missed_writes`` for the
+number skipped by that read, ``reader.total_missed_writes`` for the handle's
+cumulative total, and ``reader.last_read_count`` for the publication captured.
+These counters start when the handle attaches; writes before attachment are not
+reported as missed.
+
 Asyncio-compatible waiting
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 

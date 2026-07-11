@@ -2,12 +2,12 @@
 
 ## Implementation update
 
-The first remediation batch corrected inconsistent GPU safe-read sequencing,
-made unsupported GPU/unsafe `out=` usage explicit, documented automatic GPU
-attachment consistently, and added bounded/failed-write read behavior. The
-larger feature conclusions below are unchanged: the primitive is still a
-fixed-shape capacity-one latest-value exchange, not a FIFO stream, and dtype,
-backend, notification, namespace, and variable-size support remain future work.
+Remediation now positions the primitive explicitly as a fixed-shape,
+capacity-one latest-value exchange and exposes per-handle missed-publication
+counters. It also corrected GPU safe-read sequencing, made unsupported
+GPU/unsafe `out=` usage explicit, documented automatic GPU attachment, and
+added bounded/failed-write behavior. A FIFO/ring-buffer primitive, broader
+dtypes, notification, namespace, and variable-size support remain future work.
 
 ## What the library really provides
 
@@ -24,14 +24,14 @@ Calling the primitive a stream obscures consequential semantics:
 - a fast producer overwrites data before a slow consumer sees it;
 - there is no FIFO ordering, retention, replay, backpressure, or acknowledgement;
 - there are no per-consumer cursors;
-- `count` lets a caller calculate a gap manually, but `read_new()` does not
-  return the count or number of skipped writes;
+- each handle reports skipped publications after reads, but overwritten payloads
+  cannot be recovered;
 - there is no waitable notification; readers poll shared metadata;
 - there is no end-of-stream, cancellation, schema evolution, or producer-health
   concept.
 
-The repository should explicitly market a **latest-value shared tensor** or add
-a ring-buffer/queue primitive. A capacity-N mode with monotonically numbered
+The repository now explicitly markets a **capacity-one latest-value exchange**.
+A capacity-N mode with monotonically numbered
 slots, overrun reporting, and selectable drop/block policy would dramatically
 expand adoption in camera, telemetry, and inference pipelines.
 
@@ -110,7 +110,9 @@ payloads, CUDA handles, and CUDA allocations.
 
 ## Features that would materially improve adoption
 
-1. A capacity-N ring buffer with overrun counts and block/drop policies.
+1. A capacity-N ring buffer with block/drop policies for applications that need
+   every item. The existing capacity-one exchange now reports per-handle
+   overruns through `missed_writes` and `total_missed_writes`.
 2. Waitable notifications (Linux futex/eventfd, Windows event, portable
    semaphore fallback) instead of micro-sleeps.
 3. Explicit semantic profiles: `latest_value`, `queue`, and perhaps

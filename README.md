@@ -2,8 +2,8 @@
 
 [PyPI](https://pypi.org/project/pyshmem/) | [Documentation](https://pyshmem.readthedocs.io/) | [Source](https://github.com/jacotay7/pyshmem) | [Issues](https://github.com/jacotay7/pyshmem/issues)
 
-pyshmem provides named shared-memory streams for NumPy arrays and optional
-CUDA-backed PyTorch pipelines. It is designed for applications that need
+pyshmem provides named, capacity-one latest-value exchanges for NumPy arrays
+and optional CUDA-backed PyTorch pipelines. It is designed for applications that need
 low-latency data exchange between OS processes — sensor pipelines, adaptive
 optics control systems, and similar real-time workloads — without reinventing
 locking, metadata, and CPU/GPU lifecycle management each time.
@@ -17,6 +17,8 @@ locking, metadata, and CPU/GPU lifecycle management each time.
   processes and threads.
 - **Consistent snapshot reads.** An odd/even write-sequence counter lets readers
   take coherent snapshots without holding the write lock.
+- **Observable overruns.** Each handle reports `missed_writes` and
+  `total_missed_writes` when producers publish faster than it reads.
 - **Explicit GPU modes.** Choose between a fast no-mirror GPU path and a
   CPU-mirrored compatibility path.
 - **Persistent streams on POSIX.** Streams survive process exits and can be
