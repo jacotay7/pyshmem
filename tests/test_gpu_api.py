@@ -31,6 +31,32 @@ def test_numpy_gpu_write_source_stays_on_cpu():
 
 
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+@pytest.mark.parametrize(
+    "dtype,values",
+    [
+        (np.uint16, [1, 2]),
+        (np.uint32, [1, 2]),
+        (np.uint64, [1, 2]),
+        (np.bool_, [True, False]),
+        (np.complex64, [1 + 2j, 3 + 4j]),
+        (np.complex128, [1 + 2j, 3 + 4j]),
+    ],
+)
+def test_capability_driven_gpu_dtype_round_trip(shm_name, dtype, values):
+    if np.dtype(dtype) not in pyshmem.GPU_SUPPORTED_DTYPES:
+        pytest.skip("installed torch does not expose this dtype")
+    shm = pyshmem.create(
+        shm_name, shape=(2,), dtype=dtype, gpu_device="cuda:0"
+    )
+    payload = np.asarray(values, dtype=dtype)
+    try:
+        shm.write(payload)
+        np.testing.assert_array_equal(shm.read().cpu().numpy(), payload)
+    finally:
+        shm.unlink()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
 def test_pinned_buffer_is_reused_and_writable(shm_name):
     shm = pyshmem.create(
         shm_name,

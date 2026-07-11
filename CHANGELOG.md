@@ -25,6 +25,8 @@ All notable user-facing changes are documented here. The project follows
   host-to-GPU writes.
 - Replaced whole-device CUDA synchronization with active-stream event waits for
   synchronous GPU reads, writes, and clears.
+- Made GPU dtype support reflect installed PyTorch capabilities and added stable
+  bool/complex codes to the CPU/persistent format.
 
 ## 1.0.5
 

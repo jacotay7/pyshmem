@@ -6,8 +6,9 @@ Remediation now positions the primitive explicitly as a fixed-shape,
 capacity-one latest-value exchange and exposes per-handle missed-publication
 counters. It also corrected GPU safe-read sequencing, made unsupported
 GPU/unsafe `out=` usage explicit, documented automatic GPU attachment, and
-added bounded/failed-write behavior. A FIFO/ring-buffer primitive, broader
-dtypes, notification, namespace, and variable-size support remain future work.
+added bounded/failed-write behavior. CPU bool/complex and capability-driven GPU
+dtypes are now supported. A FIFO/ring-buffer primitive, notification,
+namespace, and variable-size support remain future work.
 
 ## What the library really provides
 

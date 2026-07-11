@@ -56,34 +56,21 @@ DTYPE_TABLE = (
     np.dtype(np.float16),
     np.dtype(np.float32),
     np.dtype(np.float64),
+    np.dtype(np.bool_),
+    np.dtype(np.complex64),
+    np.dtype(np.complex128),
 )
 DTYPE_TO_CODE = {dtype: index for index, dtype in enumerate(DTYPE_TABLE)}
 if torch is not None:
-    TORCH_DTYPE_MAP = {
-        np.dtype(np.float16): torch.float16,
-        np.dtype(np.float32): torch.float32,
-        np.dtype(np.float64): torch.float64,
-        np.dtype(np.int8): torch.int8,
-        np.dtype(np.int16): torch.int16,
-        np.dtype(np.int32): torch.int32,
-        np.dtype(np.int64): torch.int64,
-        np.dtype(np.uint8): torch.uint8,
-    }
+    TORCH_DTYPE_MAP = {}
+    for _dtype in DTYPE_TABLE:
+        _torch_dtype = getattr(torch, _dtype.name, None)
+        if _torch_dtype is not None:
+            TORCH_DTYPE_MAP[_dtype] = _torch_dtype
 else:
     TORCH_DTYPE_MAP = {}
 
-GPU_SUPPORTED_DTYPES: frozenset = frozenset(
-    {
-        np.dtype(np.float16),
-        np.dtype(np.float32),
-        np.dtype(np.float64),
-        np.dtype(np.int8),
-        np.dtype(np.int16),
-        np.dtype(np.int32),
-        np.dtype(np.int64),
-        np.dtype(np.uint8),
-    }
-)
+GPU_SUPPORTED_DTYPES: frozenset = frozenset(TORCH_DTYPE_MAP)
 
 METADATA_VERSION = 3
 LEGACY_METADATA_VERSION = 2

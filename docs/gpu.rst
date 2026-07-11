@@ -18,24 +18,26 @@ Check that the GPU path is usable before creating streams:
 Supported dtypes
 ----------------
 
-Only dtypes with a direct PyTorch equivalent are accepted for GPU streams:
+GPU dtypes are capability-driven: pyshmem accepts every dtype in its persistent
+format table that the installed PyTorch exposes directly:
 
 .. code-block:: python
 
    pyshmem.GPU_SUPPORTED_DTYPES
-   # frozenset({float16, float32, float64, int8, int16, int32, int64, uint8})
+   # exact contents depend on the installed torch version
 
-``uint16``, ``uint32``, and ``uint64`` have no PyTorch counterpart.  Passing
-them to :func:`pyshmem.create` with ``gpu_device`` set raises
-:class:`ValueError` at construction time, before any shared-memory segments are
-allocated.
+Current PyTorch releases expose unsigned 16/32/64-bit integers, booleans, and
+complex types in addition to the original signed integer and floating types.
+Older supported PyTorch releases may expose a smaller set. Passing a dtype not
+listed by :data:`pyshmem.GPU_SUPPORTED_DTYPES` raises :class:`ValueError` at
+construction time, before shared-memory segments are allocated.
 
 .. code-block:: python
 
    import numpy as np
 
    np.dtype("float32") in pyshmem.GPU_SUPPORTED_DTYPES   # True
-   np.dtype("uint32")  in pyshmem.GPU_SUPPORTED_DTYPES   # False
+   np.dtype("uint32") in pyshmem.GPU_SUPPORTED_DTYPES
 
 Creating a GPU stream
 ---------------------

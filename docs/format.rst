@@ -96,6 +96,11 @@ hashes back to the exact internal segment identifier.
 Compatibility
 -------------
 
+The stable dtype code table contains signed and unsigned 8/16/32/64-bit
+integers, float16/32/64, bool, and complex64/128. Bool and complex were appended
+to the original table, preserving every existing code. GPU acceptance is a
+runtime PyTorch capability decision; the on-disk code itself remains stable.
+
 Version 3 readers retain read/write compatibility with version 2 metadata,
 whose first 256 bytes are a native ``float64[32]`` array. New streams are always
 created as version 3. Unknown versions, invalid v3 header sizes, and malformed

@@ -47,6 +47,7 @@ surface is Linux and macOS; CUDA support is Linux-only.
 | Direct host-to-shared-GPU writes | Done | NumPy/CPU values remain host tensors until `shared_cuda_tensor.copy_`, eliminating the temporary GPU allocation and extra D2D copy. A regression test checks zero-copy NumPy wrapping on CPU; a 4 MB local probe improved from the audited 186.25 us to median 171.70 us. |
 | Reusable pinned GPU staging | Done | `SharedMemory.pinned_buffer()` lazily allocates and reuses a correctly shaped/dtyped page-locked CPU tensor, writable through a zero-copy NumPy view. Regression coverage verifies reuse and round-trip correctness; repeated 4 MB writes measured median 149.67 us versus 171.70 us pageable. |
 | Stream-local CUDA synchronization | Done | GPU read/write/clear records and synchronizes an event on the active CUDA stream instead of calling whole-device `torch.cuda.synchronize`. Publication remains synchronous and safe. A regression test forbids the global API while round-trip and clear operations succeed. Fully async cross-process publication remains open. |
+| Capability-driven dtype support | Done | GPU dtype support is derived from attributes exposed by the installed PyTorch instead of a stale fixed subset. The persistent table was backward-compatibly extended with bool and complex64/128. CPU and real-CUDA tests cover bool/complex and torch 2.10 unsigned 16/32/64-bit round trips. |
 
 ## Verification record
 
@@ -101,7 +102,7 @@ precisely isolating that lifecycle warning remains open.
    longer synchronize the whole device.
 2. Replace polling with waitable notifications plus an optional adaptive spin
    policy.
-3. Add DLPack/array-interface adapters, capability-driven dtype support,
-   namespaces, read-only handles, and producer heartbeat/staleness metadata.
+3. Add DLPack/array-interface adapters, namespaces, read-only handles, and
+   producer heartbeat/staleness metadata. Dtype support is now capability-driven.
 4. Split the implementation by format, synchronization, lifecycle, CPU backend,
    and CUDA backend once the contracts above are fixed.

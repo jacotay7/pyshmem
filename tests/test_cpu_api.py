@@ -612,23 +612,25 @@ def test_gpu_supported_dtypes_is_public_frozenset():
 
 
 def test_gpu_supported_dtypes_contains_torch_mapped_types():
-    for dtype in (
-        np.float16,
-        np.float32,
-        np.float64,
-        np.int8,
-        np.int16,
-        np.int32,
-        np.int64,
-        np.uint8,
+    expected = {
+        dtype
+        for dtype in pyshmem_shared.DTYPE_TABLE
+        if getattr(pyshmem_shared.torch, dtype.name, None) is not None
+    }
+    assert pyshmem.GPU_SUPPORTED_DTYPES == expected
+
+
+def test_cpu_round_trip_supports_bool_and_complex(shm_name):
+    for dtype, values in (
+        (np.bool_, [True, False]),
+        (np.complex64, [1 + 2j, 3 + 4j]),
+        (np.complex128, [1 + 2j, 3 + 4j]),
     ):
-        assert np.dtype(dtype) in pyshmem.GPU_SUPPORTED_DTYPES
-
-
-def test_gpu_supported_dtypes_excludes_non_gpu_integer_types():
-    # uint16 / uint32 / uint64 have no direct torch equivalent.
-    for dtype in (np.uint16, np.uint32, np.uint64):
-        assert np.dtype(dtype) not in pyshmem.GPU_SUPPORTED_DTYPES
+        shm = pyshmem.create(shm_name, shape=(2,), dtype=dtype)
+        payload = np.asarray(values, dtype=dtype)
+        shm.write(payload)
+        np.testing.assert_array_equal(shm.read(), payload)
+        shm.unlink()
 
 
 # ---------------------------------------------------------------------------

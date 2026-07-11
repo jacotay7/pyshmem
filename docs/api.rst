@@ -34,12 +34,11 @@ Top-level functions and constants
    .. code-block:: python
 
       pyshmem.GPU_SUPPORTED_DTYPES
-      # frozenset({float16, float32, float64, int8, int16, int32, int64, uint8})
+      # contents reflect the installed torch's dtype capabilities
 
-   ``uint16``, ``uint32``, and ``uint64`` are **not** in this set because
-   pyshmem's supported PyTorch version range does not guarantee the operations
-   needed for those dtypes. Passing an unsupported dtype to :func:`create` with
-   ``gpu_device`` set raises :class:`ValueError` at construction time.
+   The set is derived from dtype attributes exposed by the installed PyTorch.
+   Passing an unsupported dtype to :func:`create` with ``gpu_device`` set raises
+   :class:`ValueError` at construction time.
 
 SharedMemory
 ------------
