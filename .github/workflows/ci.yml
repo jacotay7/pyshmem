@@ -103,11 +103,31 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]"
 
+      - name: Cross-process spawn smoke (diagnostic)
+        env:
+          PYTHONFAULTHANDLER: "1"
+          PYTHONUNBUFFERED: "1"
+        # Isolates "pyshmem across a spawned process" from the pytest harness.
+        # If this hangs the child dumps its own traceback after 20s; if it
+        # passes but the suite hangs, the issue is the runner, not pyshmem.
+        run: python tests/_spawn_smoke.py
+
       - name: Run CPU test suite
-        run: pytest -m "cpu and not benchmark" -q
+        env:
+          PYTHONFAULTHANDLER: "1"
+          PYTHONUNBUFFERED: "1"
+        # -v prints each test as it starts, so a hang shows the exact test as
+        # the last line; the per-test timeout (thread method works on Windows)
+        # dumps all thread stacks and fails instead of wedging the runner.
+        run: >-
+          pytest -m "cpu and not benchmark" -v -rA
+          --timeout=90 --timeout-method=thread
 
       - name: Run benchmark smoke
         env:
           pyshmem_ENFORCE_BENCHMARK: "0"
           pyshmem_TARGET_HZ: "50000"
-        run: pytest -m "cpu and benchmark" -q -s
+          PYTHONFAULTHANDLER: "1"
+        run: >-
+          pytest -m "cpu and benchmark" -q -s
+          --timeout=120 --timeout-method=thread
