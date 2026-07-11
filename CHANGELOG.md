@@ -21,6 +21,8 @@ All notable user-facing changes are documented here. The project follows
   performance, license, and contact landing page linked to detailed docs.
 - Removed a temporary CUDA allocation and extra device copy from NumPy/CPU
   writes by copying directly into shared GPU storage.
+- Added reusable `SharedMemory.pinned_buffer()` host staging for faster repeated
+  host-to-GPU writes.
 
 ## 1.0.5
 

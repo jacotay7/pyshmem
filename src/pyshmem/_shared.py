@@ -1344,6 +1344,7 @@ class SharedMemory:
         self._metadata = _MetadataView(self._metadata_shm.buf)
         self._gpu_tensor = gpu_tensor
         self._torch_dtype = torch_dtype
+        self._pinned_staging = None
         self._last_seen_count = int(self._metadata[METADATA_INDEX_COUNT])
         self._last_missed_writes = 0
         self._total_missed_writes = 0
@@ -2011,6 +2012,7 @@ class SharedMemory:
         # stream is destroyed.
         if self._gpu_tensor is not None and not self.owner:
             self._gpu_tensor = None
+        self._pinned_staging = None
         self._closed = True
         if not self._lock_state_released:
             _release_lock_state(self._lock_state)
@@ -2060,6 +2062,27 @@ class SharedMemory:
                 raise
             else:
                 self._finish_write()
+
+    def pinned_buffer(self):
+        """Return a reusable pinned CPU tensor for this GPU handle.
+
+        Fill the returned tensor (or its zero-copy NumPy view) and pass it to
+        :meth:`write` for a direct pinned host-to-device transfer. The buffer
+        belongs to this handle and is released by :meth:`close`.
+        """
+        self._ensure_open("allocate a pinned buffer for")
+        if self._gpu_tensor is None:
+            raise RuntimeError(
+                "pinned_buffer() requires a GPU-attached stream handle"
+            )
+        if self._pinned_staging is None:
+            self._pinned_staging = torch.empty(
+                self.shape,
+                dtype=self._torch_dtype,
+                device="cpu",
+                pin_memory=True,
+            )
+        return self._pinned_staging
 
     def write(self, value: Any) -> None:
         """Write a full payload into the stream.

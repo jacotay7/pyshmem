@@ -85,6 +85,25 @@ Behaviour:
   no mirror to fall back on, so :func:`~pyshmem.open` raises a clear error.
 - Intended for GPU-heavy pipelines where throughput matters most.
 
+Pinned staging
+^^^^^^^^^^^^^^
+
+For repeated host-to-GPU writes, :meth:`~pyshmem.SharedMemory.pinned_buffer`
+returns one reusable page-locked CPU tensor with the stream's shape and dtype.
+Fill it directly, or fill its zero-copy NumPy view, then publish it:
+
+.. code-block:: python
+
+   staging = shm.pinned_buffer()
+   staging.numpy()[:] = next_numpy_frame
+   shm.write(staging)
+
+The synchronous write is complete before it returns, so the same staging buffer
+can be refilled immediately. On the primary development machine, repeated 4 MB
+writes from this buffer measured a 149.67 us median versus 171.70 us from a
+pageable NumPy array. Measure on the intended hardware; pinning too much host
+memory can reduce overall system performance.
+
 Compatibility mode
 ^^^^^^^^^^^^^^^^^^
 

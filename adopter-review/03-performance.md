@@ -72,8 +72,9 @@ host-to-destination copy took 143.43 us in the same environment.
 **Direct destination copy resolved:** NumPy and CPU tensor inputs now stay on
 the host until ``shared_cuda_tensor.copy_``, avoiding the temporary GPU tensor
 and extra D2D copy. A 4 MB local follow-up measured median 171.70 us versus the
-original 186.25 us. Expose pinned staging buffers and cache/reuse staging
-allocations for the remaining transfer cost. The same issue affects
+original 186.25 us. **Pinned staging is also resolved:**
+``SharedMemory.pinned_buffer()`` reuses page-locked host storage and measured a
+149.67 us median for the same 4 MB write. The remaining related issue affects
 GPU-to-CPU mirroring, which currently creates a CPU result and then copies it
 again into shared memory.
 

@@ -30,6 +30,30 @@ def test_numpy_gpu_write_source_stays_on_cpu():
     assert tensor.data_ptr() == source.ctypes.data
 
 
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_pinned_buffer_is_reused_and_writable(shm_name):
+    shm = pyshmem.create(
+        shm_name,
+        shape=(4,),
+        dtype=np.float32,
+        gpu_device="cuda:0",
+    )
+    try:
+        staging = shm.pinned_buffer()
+        assert staging.device.type == "cpu"
+        assert staging.is_pinned()
+        assert shm.pinned_buffer().data_ptr() == staging.data_ptr()
+
+        staging.numpy()[:] = [1, 2, 3, 4]
+        shm.write(staging)
+        torch.testing.assert_close(
+            shm.read(),
+            torch.arange(1, 5, device="cuda:0", dtype=torch.float32),
+        )
+    finally:
+        shm.unlink()
+
+
 def _run_python_child(code: str) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     pythonpath = env.get("PYTHONPATH")
