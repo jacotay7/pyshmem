@@ -82,7 +82,6 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
-          - windows-latest
         python-version:
           - "3.9"
           - "3.10"
@@ -103,36 +102,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]"
 
-      - name: Cross-process spawn smoke (diagnostic)
-        env:
-          PYTHONFAULTHANDLER: "1"
-          PYTHONUNBUFFERED: "1"
-        # Isolates "pyshmem across a spawned process" from the pytest harness.
-        # If this hangs the child dumps its own traceback after 20s; if it
-        # passes but the suite hangs, the issue is the runner, not pyshmem.
-        run: python tests/_spawn_smoke.py
-
-      # The per-test timeout (thread method works on Windows) is a safety net so
-      # a future hang fails the job instead of wedging the runner for hours.
+      # The per-test timeout is a safety net so a future hang fails the job
+      # instead of wedging the runner for hours.
       - name: Run CPU test suite
-        if: runner.os != 'Windows'
         env:
           PYTHONFAULTHANDLER: "1"
           PYTHONUNBUFFERED: "1"
         run: >-
           pytest -m "cpu and not benchmark" -q
-          --timeout=120 --timeout-method=thread
-
-      # multiprocessing-spawn tests wedge under pytest on Windows (a harness
-      # interaction, not a pyshmem defect; the spawn smoke step above covers the
-      # real path). Deselect them at collection with "not crossproc".
-      - name: Run CPU test suite (Windows, no cross-process)
-        if: runner.os == 'Windows'
-        env:
-          PYTHONFAULTHANDLER: "1"
-          PYTHONUNBUFFERED: "1"
-        run: >-
-          pytest -m "cpu and not benchmark and not crossproc" -q
           --timeout=120 --timeout-method=thread
 
       - name: Run benchmark smoke

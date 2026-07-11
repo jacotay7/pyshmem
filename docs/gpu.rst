@@ -187,4 +187,4 @@ Platform note
 -------------
 
 GPU IPC has been tested on Linux.  macOS does not support CUDA.  Windows is not
-tested for GPU streams.
+supported by pyshmem.

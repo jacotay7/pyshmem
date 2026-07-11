@@ -20,12 +20,6 @@ import pyshmem._shared as pyshmem_shared
 pytestmark = pytest.mark.cpu
 WINDOWS_SHARED_MEMORY_IS_EPHEMERAL = sys.platform == "win32"
 TEST_SRC_PATH = str(Path(__file__).resolve().parents[1] / "src")
-# Tests marked ``crossproc`` spawn a child process.  Under pytest on Windows
-# the multiprocessing-spawn machinery wedges during the child's bootstrap
-# import (a harness interaction, not a pyshmem defect; tests/_spawn_smoke.py
-# exercises the same create/spawn/open path standalone and passes on Windows in
-# CI).  CI deselects this marker on Windows with ``-m "... and not crossproc"``
-# so the tests are never set up there.
 
 
 def _run_python_child(code: str) -> subprocess.CompletedProcess[str]:
@@ -211,7 +205,6 @@ def test_safe_reads_stay_consistent_during_concurrent_writes(shm_name):
     writer.close()
 
 
-@pytest.mark.crossproc
 def test_cpu_stream_can_be_opened_in_another_process(shm_name):
     writer = pyshmem.create(shm_name, shape=(2, 3), dtype=np.float32)
     payload = np.arange(6, dtype=np.float32).reshape(2, 3)
@@ -358,7 +351,6 @@ def test_restricted_cuda_unpickler_rejects_dangerous_globals():
         pyshmem_shared._loads_cuda_handle(eval_ref)
 
 
-@pytest.mark.crossproc
 def test_cross_process_lock_blocks_explicit_acquire_until_release(shm_name):
     writer = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
     payload = np.arange(4, dtype=np.float32)
@@ -455,7 +447,6 @@ def test_close_is_idempotent(shm_name):
     shm.close()
 
 
-@pytest.mark.crossproc
 def test_process_crash_releases_lock(shm_name):
     shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
     shm.write(np.array([1.0, 2.0], dtype=np.float32))
@@ -486,7 +477,6 @@ def test_process_crash_releases_lock(shm_name):
     shm.close()
 
 
-@pytest.mark.crossproc
 @pytest.mark.skipif(
     WINDOWS_SHARED_MEMORY_IS_EPHEMERAL,
     reason=(
@@ -1630,7 +1620,6 @@ def test_failed_write_is_invalid_until_replaced(shm_name, monkeypatch):
     shm.close()
 
 
-@pytest.mark.crossproc
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="crash recovery relies on POSIX process-shared locks",
@@ -1655,7 +1644,6 @@ def test_reader_detects_writer_process_crash_mid_write(shm_name):
     shm.close()
 
 
-@pytest.mark.crossproc
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="crash recovery relies on POSIX process-shared locks",

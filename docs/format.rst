@@ -103,9 +103,9 @@ known flags, zeroed reserved bytes, UTF-8 name/hash relationship, dtype code,
 dimension bounds, positive shape, zeroed unused dimensions, exact
 shape/dtype/size product, CPU/GPU device rules, creator PID, timestamps, lock
 state, and that the data segment is large enough for the declared payload.
-Segment-length checks require a sufficient (not exact) mapping because macOS and
-Windows round shared-memory allocations up to a page. Discovery and purge apply
-the same header validation and ignore candidates that fail it.
+Segment-length checks require a sufficient (not exact) mapping because macOS
+rounds shared-memory allocations up to a page. Discovery and purge apply the
+same header validation and ignore candidates that fail it.
 
 Memory ordering
 ---------------

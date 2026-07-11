@@ -1,6 +1,9 @@
 Platform Notes
 ==============
 
+pyshmem targets **POSIX platforms only** (Linux and macOS). Windows is not
+supported and not tested.
+
 Linux
 -----
 
@@ -32,19 +35,10 @@ not use ``/dev/shm/``.
 Windows
 -------
 
-Windows inherits a hard limitation from :mod:`multiprocessing.shared_memory`:
-the operating system destroys a shared-memory block when the **last handle** to
-it is closed.
-
-Consequences:
-
-- A segment cannot outlive its creator if no other process still has it open.
-- ``close()`` followed by ``pyshmem.open(...)`` fails if that ``close()`` dropped
-  the final live handle.
-- :func:`pyshmem.list_streams` always returns an empty list on Windows.
-- GPU streams are not tested on Windows.
-
-These are operating-system behaviors, not pyshmem policies.
+Not supported. pyshmem depends on POSIX shared-memory persistence and
+process-shared file locks that Windows does not provide -- notably, Windows
+destroys a shared-memory block when its last handle closes, so a stream cannot
+outlive its creator. pyshmem is not tested on Windows; use Linux or macOS.
 
 Lock files
 ----------

@@ -350,6 +350,9 @@ view of a stream created with `cpu_mirror=True`.
 
 ## Platform Notes
 
+pyshmem targets **POSIX platforms only** (Linux and macOS). Windows is not
+supported and not tested.
+
 ### Linux and macOS
 
 POSIX platforms support persistent streams: a segment survives the creator
@@ -364,14 +367,10 @@ for the full memory model.
 
 ### Windows
 
-Windows inherits a hard limitation from `multiprocessing.shared_memory`: the
-operating system destroys the shared-memory segment when the last handle closes.
-
-The following behaviors are unsupported on Windows:
-
-- a segment outliving its creator when no other process still has it open
-- `close()` followed by `pyshmem.open(...)` when that `close()` dropped the
-  last live handle
+Not supported. pyshmem relies on POSIX shared-memory persistence and
+process-shared file locks that Windows does not provide (Windows destroys a
+shared-memory segment when its last handle closes), so streams cannot outlive
+their creator there. Use Linux or macOS.
 
 ## Environment Variables
 
