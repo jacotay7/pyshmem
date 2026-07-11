@@ -15,8 +15,9 @@ Completed repository-health items from the first batch:
   result.
 
 Still open: real GPU CI, dependency/security automation, type checking,
-governance/support files, hosted-doc deployment, single-source versioning,
-release gating, and architectural/private-API work.
+hosted-doc deployment, single-source versioning, release gating, and
+architectural/private-API work. Contributor, security, support/compatibility,
+and changelog policies have now been added.
 
 ## Positive signals
 
@@ -38,9 +39,9 @@ review time. The repository history is authored by one person. Small projects
 can be excellent, but an adopter has no visible bus-factor mitigation or even a
 normal path to report defects.
 
-Missing community/maintenance material includes CONTRIBUTING, SECURITY,
-CODE_OF_CONDUCT, support policy, compatibility/deprecation policy, changelog
-file, architecture decision records, and maintainer/release succession. The GPL
+The repository now includes CONTRIBUTING, SECURITY, support/compatibility, and
+changelog files. CODE_OF_CONDUCT, architecture decision records, and
+maintainer/release succession remain premature for a one-person project. The GPL
 3-only license is valid but will rule out many proprietary adopters; the README
 should make the consequence prominent rather than leaving it to metadata.
 

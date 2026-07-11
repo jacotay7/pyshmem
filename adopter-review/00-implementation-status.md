@@ -36,6 +36,7 @@ Scope: first remediation batch following the critical adopter review
 | Interprocess publication ordering enforced | Done | Safe reads use x86-64 TSO directly, runtime `libatomic` acquire/release operations elsewhere when available, and a process-shared OS-lock barrier fallback. Regression tests force native and fallback paths; payload copies remain outside the lock with sequence retry semantics. |
 | Capacity-one contract and overrun reporting | Done | README and overview now lead with latest-value/capacity-one semantics. Each handle exposes `last_read_count`, per-read `missed_writes`, and cumulative `total_missed_writes`; regression coverage proves skipped publications are counted without changing the zero-queue design. |
 | Spawned-process benchmark harness | Done | `benchmarks/benchmark_ipc.py` calibrates repeated spawn-based request/ack IPC runs and reports throughput plus p50/p95/p99 latency in versioned JSON. It includes an explicitly unsafe raw `multiprocessing.shared_memory` lower-bound baseline, a CI smoke test, and checked-in RTX 5090/Linux results. |
+| Maintainer and adopter policies | Done | Added contributor workflow, security disclosure instructions, support/platform/API compatibility policy, and a repository changelog; README links all four. CODE_OF_CONDUCT and succession policy are deferred until the project has multiple participants. |
 
 ## Verification record
 

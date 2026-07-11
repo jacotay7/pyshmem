@@ -2,6 +2,9 @@
 
 [PyPI](https://pypi.org/project/pyshmem/) | [Documentation](https://pyshmem.readthedocs.io/) | [Source](https://github.com/jacotay7/pyshmem) | [Issues](https://github.com/jacotay7/pyshmem/issues)
 
+Project policies: [contributing](CONTRIBUTING.md), [security](SECURITY.md),
+[support and compatibility](SUPPORT.md), and [changelog](CHANGELOG.md).
+
 pyshmem provides named, capacity-one latest-value exchanges for NumPy arrays
 and optional CUDA-backed PyTorch pipelines. It is designed for applications that need
 low-latency data exchange between OS processes — sensor pipelines, adaptive
