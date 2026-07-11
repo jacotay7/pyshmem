@@ -356,6 +356,12 @@ POSIX platforms support persistent streams: a segment survives the creator
 process exiting as long as at least one other process holds it open (or until
 `unlink()` is called). GPU IPC has been tested on Linux.
 
+The lock-free read/write consistency protocol is validated under CPython on
+**x86-64** and **aarch64**; other CPU architectures are best-effort because
+pyshmem inserts no explicit hardware memory barriers. See the
+[shared-memory format docs](https://pyshmem.readthedocs.io/en/latest/format.html)
+for the full memory model.
+
 ### Windows
 
 Windows inherits a hard limitation from `multiprocessing.shared_memory`: the

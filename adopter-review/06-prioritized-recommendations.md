@@ -21,6 +21,11 @@ Detailed evidence is in [Implementation status](00-implementation-status.md).
   fixed-width aligned fields, explicit little-endian encoding, feature flags,
   and v2 attachment compatibility. Strict semantic corruption and payload
   geometry validation is also **implemented** for open, discovery, and purge.
+  The interprocess **memory model is now specified** (encoding, alignment,
+  seqlock protocol, reliance assumptions, and the absence of hardware barriers),
+  with correctness claims **narrowed** to validated architectures (x86-64,
+  aarch64) and the hot-path counter alignment enforced by a regression test. A
+  native acquire/release atomic backend remains the open enforcement step.
 
 The original prioritized list below is retained so unfinished portions remain
 visible rather than disappearing when an item is partially completed.

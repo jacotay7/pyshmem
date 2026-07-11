@@ -25,6 +25,7 @@ Scope: first remediation batch following the critical adopter review
 | Obsolete former-name distributions | Done | Tracked `dist-release/pyshare-1.0.0*` artifacts removed. |
 | Persistent metadata representation | Done: format foundation | New streams use a documented v3 256-byte little-endian header with magic, feature flags, aligned fixed-width integer counters and dimensions. Readers retain v2 compatibility. Native acquire/release atomics remain open. |
 | Metadata corruption validation | Done | Open, discovery, and purge validate header/segment length, flags, reserved bytes, stored name, dtype, dimensions, shape, byte-size product, CPU/GPU rules, creator and lock fields, timestamps, unused dimensions, and actual payload segment size before mapping. |
+| Interprocess memory model specified | Done: documented model | `docs/format.rst` now specifies encoding, alignment, the seqlock protocol, what pyshmem relies on (single-writer serialization, aligned 8-byte counter atomicity, program-order publication), what it does *not* provide (no hardware barriers), and the validated architectures (x86-64, aarch64). Platform docs and README narrow correctness claims accordingly. A regression test enforces 8-byte alignment of the hot-path counters. A native acquire/release atomic backend remains the open enforcement piece. |
 
 ## Verification record
 
@@ -47,9 +48,10 @@ precisely isolating that lifecycle warning remains open.
 
 ### P1 correctness and contract
 
-1. Define and enforce the interprocess memory model. Replace `float64` metadata
-   counters with fixed-width integers and use acquire/release-capable atomic
-   operations or a native synchronization layer.
+1. Enforce the specified memory model in hardware. Fixed-width aligned counters
+   and the model itself are now documented and the alignment contract is
+   test-guarded, so the remaining step is a native acquire/release atomic
+   backend (or FFI synchronization layer) for weakly ordered architectures.
 2. Extend format validation only when new fields/features are introduced. The
    current v3 semantic fields and segment geometry are validated; checksums or
    authenticated metadata remain optional future hardening.

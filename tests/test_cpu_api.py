@@ -771,6 +771,17 @@ def test_open_rejects_data_segment_size_mismatch(shm_name):
         pyshmem.unlink(shm_name)
 
 
+@pytest.mark.parametrize("field", ["count", "write_sequence"])
+def test_hot_path_counters_are_8_byte_aligned(field):
+    """The documented memory model relies on single-copy atomicity of the
+    hot-path counters, which requires 8-byte width on an 8-byte boundary.
+    Guard the layout so a future header edit cannot silently break it."""
+    fields = pyshmem_shared.METADATA_V3_DTYPE.fields
+    subdtype, offset = fields[field][0], fields[field][1]
+    assert subdtype.itemsize == 8, f"{field} must be 8 bytes wide"
+    assert offset % 8 == 0, f"{field} offset {offset} must be 8-byte aligned"
+
+
 @pytest.mark.cpu
 @pytest.mark.skipif(
     sys.platform in ("win32", "darwin"),
