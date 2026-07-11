@@ -2215,6 +2215,26 @@ class SharedMemory:
 
         ``out`` is forwarded to :meth:`read`: a pre-allocated NumPy array
         receives the payload directly (zero-alloc) for CPU streams.
+
+        This is **edge-triggered relative to the moment it is called**: it
+        snapshots the current publication count on entry and returns on the
+        first write whose count differs. It answers "is there anything newer
+        than *now*?", not "has the count reached *N*?" Consequences:
+
+        * It never guarantees you observe *every* write. On a busy stream a
+          single call returns the latest value and silently steps over any
+          writes published between your previous read and this call — the
+          capacity-one latest-value contract. Use ``missed_writes`` /
+          ``total_missed_writes`` to see how many were skipped.
+        * **Do not use it for synchronous request/response ("ping-pong")
+          topologies** where the producer blocks waiting for your reply. If
+          the request is published in the gap before this call snapshots its
+          baseline, the write is folded into the baseline and this call waits
+          for the *next* one, which never arrives because the producer is
+          blocked — a deadlock. For lock-step exchanges, poll the level
+          instead: capture ``n = shm.count`` before issuing the request, then
+          wait until ``shm.count`` advances past ``n`` (a level check cannot
+          miss an already-published edge).
         """
         self._ensure_open("read from")
         baseline = self.count

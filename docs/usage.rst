@@ -224,6 +224,36 @@ cumulative total, and ``reader.last_read_count`` for the publication captured.
 These counters start when the handle attaches; writes before attachment are not
 reported as missed.
 
+.. warning::
+
+   ``read_new`` is **edge-triggered relative to the moment you call it**: it
+   snapshots the current write count on entry and returns on the first write
+   whose count differs.  It answers *"is there anything newer than now?"*, not
+   *"has the count reached N?"*.  This is ideal for latest-value streaming
+   (grab the freshest frame, skip stale ones), but it is **unsafe for
+   synchronous request/response ("ping-pong") exchanges** where the producer
+   blocks waiting for your reply.  If the request is published in the small
+   window before ``read_new`` snapshots its baseline, that write is folded into
+   the baseline and the call waits for the *next* one — which never arrives,
+   because the producer is blocked on your response.  Both sides then deadlock
+   until their timeouts fire.
+
+   For lock-step exchanges, poll the level instead of the edge: capture
+   ``n = shm.count`` before issuing the request, then wait until ``shm.count``
+   advances past ``n``.  A level check cannot miss an edge that was already
+   published.
+
+   .. code-block:: python
+
+      # Safe request/response consumer (level-triggered):
+      expected = request.count + 1
+      deadline = time.monotonic() + timeout
+      while request.count < expected:
+          if time.monotonic() >= deadline:
+              raise TimeoutError
+          time.sleep(0)
+      payload = request.read()
+
 Asyncio-compatible waiting
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
