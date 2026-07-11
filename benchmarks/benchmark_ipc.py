@@ -26,7 +26,19 @@ def _pyshmem_consumer(request_name, ack_name, iterations, ready):
     ready.set()
     try:
         for generation in range(1, iterations + 1):
-            request.read_new(timeout=10.0)
+            # Level-triggered wait on the publication count.  Unlike
+            # edge-triggered read_new (which snapshots a baseline at call
+            # time), this cannot miss a request that the producer published
+            # in the window between our previous ack and this poll, so the
+            # ping-pong never deadlocks under scheduler pressure.
+            deadline = time.monotonic() + 10.0
+            while request.count < generation:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"timed out waiting for request gen {generation}"
+                    )
+                time.sleep(0)
+            request.read()
             ack.write(np.array([generation], dtype=np.int64))
     finally:
         request.close()
@@ -75,7 +87,18 @@ def _run_pyshmem(iterations: int, payload_bytes: int) -> list[int]:
         for generation in range(1, iterations + 1):
             started = time.perf_counter_ns()
             request.write(payload)
-            ack.read_new(timeout=10.0)
+            # Level-triggered wait on the ack count, mirroring the raw
+            # baseline.  Polling the published counter (rather than the
+            # edge-triggered read_new baseline) cannot miss an ack that the
+            # consumer publishes before we start waiting, so the round-trip
+            # is deterministic under load.
+            deadline = time.monotonic() + 10.0
+            while ack.count < generation:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"timed out waiting for ack generation {generation}"
+                    )
+                time.sleep(0)
             latencies.append(time.perf_counter_ns() - started)
         process.join(20.0)
         if process.exitcode != 0:
