@@ -8,7 +8,9 @@ the CPU failure-handling path out of an extra context-manager hot path, the
 The now sequence-safe GPU roundtrip measured 27,516 Hz versus the original
 31,035 Hz. That cost is accepted for correctness; CUDA event/stream-aware async
 operations remain the next route to recovering throughput without weakening the
-contract. The broader benchmark-methodology criticisms below remain open.
+contract. A new spawned-process harness now supplies calibrated repetitions,
+percentile latency, a raw shared-memory comparison, JSON output, and a checked-in
+64 KiB result. A comparable PyTorch/CUDA process baseline remains open.
 
 ## Measured results on the supplied machine
 
@@ -109,6 +111,15 @@ vectors. Fixed integer metadata and a compact native hot path would reduce both
 latency and memory-model ambiguity.
 
 ## Problems in the published benchmark story
+
+### Implementation update
+
+Items 1–3 below are resolved for CPU by ``benchmarks/benchmark_ipc.py``: it
+crosses a spawn process boundary, compares an explicitly unsafe raw shared-memory
+lower bound, calibrates duration, repeats measurements, and records p50/p95/p99
+latency in versioned JSON. The historical criticisms are retained to explain
+why the original smoke figures must not be presented as IPC claims. GPU still
+needs a CUDA/PyTorch process baseline and event-aware measurements.
 
 1. **No process boundary.** All timed writer/reader handles are in one process.
    This omits scheduling, wakeup, consumer startup, CUDA context, and

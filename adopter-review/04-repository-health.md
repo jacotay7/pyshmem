@@ -10,7 +10,9 @@ Completed repository-health items from the first batch:
 - repository docs were corrected for GPU auto-attachment, safe-read recovery,
   GPU `out=`, and purge scope;
 - fault, lock-deadline, descriptor-lifecycle, purge-ownership, and GPU sequence
-  regression tests were added.
+  regression tests were added;
+- a spawned-process IPC benchmark has a CI smoke test and a versioned JSON
+  result.
 
 Still open: real GPU CI, dependency/security automation, type checking,
 governance/support files, hosted-doc deployment, single-source versioning,

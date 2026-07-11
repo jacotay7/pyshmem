@@ -35,6 +35,7 @@ Scope: first remediation batch following the critical adopter review
 | Pickle CUDA trust boundary | Done | GPU handle reconstruction no longer calls raw `pickle.loads` on the writable 0600 segment. `_RestrictedCudaUnpickler` permits only torch's known CUDA rebuild globals and inert dtype values, so a tampered payload raises `UnpicklingError` instead of executing code. Validated on an RTX 5090: a legit reduction still round-trips, a child opening a tampered handle fails with `disallowed global`, and a torch-independent CPU test covers the rejection path. Documented in `docs/format.rst` and CLAUDE.md. |
 | Interprocess publication ordering enforced | Done | Safe reads use x86-64 TSO directly, runtime `libatomic` acquire/release operations elsewhere when available, and a process-shared OS-lock barrier fallback. Regression tests force native and fallback paths; payload copies remain outside the lock with sequence retry semantics. |
 | Capacity-one contract and overrun reporting | Done | README and overview now lead with latest-value/capacity-one semantics. Each handle exposes `last_read_count`, per-read `missed_writes`, and cumulative `total_missed_writes`; regression coverage proves skipped publications are counted without changing the zero-queue design. |
+| Spawned-process benchmark harness | Done | `benchmarks/benchmark_ipc.py` calibrates repeated spawn-based request/ack IPC runs and reports throughput plus p50/p95/p99 latency in versioned JSON. It includes an explicitly unsafe raw `multiprocessing.shared_memory` lower-bound baseline, a CI smoke test, and checked-in RTX 5090/Linux results. |
 
 ## Verification record
 
@@ -76,9 +77,8 @@ precisely isolating that lifecycle warning remains open.
 
 ### P1 product and validation
 
-1. Build a reproducible spawned-process benchmark harness with raw shared-memory
-   and PyTorch baselines, calibrated duration, repetitions, percentiles, and
-   versioned JSON results.
+1. Add a spawned-process PyTorch/CUDA IPC baseline to the now-reproducible CPU
+   harness when CUDA event-aware behavior is implemented.
 2. Add actual GPU CI hardware and test the minimum/newest supported PyTorch
    versions; the current GitHub workflow remains CPU-only.
 3. Rebuild hosted Read the Docs and enable a normal public issue-reporting path.

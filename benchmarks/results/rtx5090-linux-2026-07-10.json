@@ -1,0 +1,42 @@
+{
+  "benchmark": "spawned_process_ping_pong",
+  "created_at": "2026-07-11T06:42:41.911245+00:00",
+  "environment": {
+    "hostname": "HQAOBenchsimulator",
+    "machine": "x86_64",
+    "numpy": "2.2.6",
+    "pid": 944948,
+    "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+    "pyshmem": "1.0.5",
+    "python": "3.12.0"
+  },
+  "minimum_repeat_seconds": 0.25,
+  "payload_bytes": 65536,
+  "results": {
+    "pyshmem": {
+      "iterations_per_repeat": 2841,
+      "latency_us": {
+        "mean": 85.59255755015839,
+        "p50": 77.69,
+        "p95": 139.381,
+        "p99": 140.03078
+      },
+      "repeats": 3,
+      "roundtrips_per_second": 11683.258785835282,
+      "samples": 8523
+    },
+    "raw_shared_memory": {
+      "iterations_per_repeat": 4578,
+      "latency_us": {
+        "mean": 55.26022062035823,
+        "p50": 52.67,
+        "p95": 62.86214999999987,
+        "p99": 107.37067
+      },
+      "repeats": 3,
+      "roundtrips_per_second": 18096.19992055539,
+      "samples": 13734
+    }
+  },
+  "schema_version": 1
+}
