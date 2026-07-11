@@ -28,6 +28,7 @@ Scope: first remediation batch following the critical adopter review
 | Interprocess memory model specified | Done: documented model | `docs/format.rst` now specifies encoding, alignment, the seqlock protocol, what pyshmem relies on (single-writer serialization, aligned 8-byte counter atomicity, program-order publication), what it does *not* provide (no hardware barriers), and the validated architectures (x86-64, aarch64). Platform docs and README narrow correctness claims accordingly. A regression test enforces 8-byte alignment of the hot-path counters. A native acquire/release atomic backend remains the open enforcement piece. |
 | Unlink/recreate lock-inode generation | Done | `_SharedLockState` records the lock file's inode and rebinds a stale handle on each acquire when the pathname resolves to a new inode, so a stream destroyed and recreated while old handles are live reconverges on one shared lock instead of splitting into per-generation locks. Regression tests cover the refresh mechanism and post-recreate convergence (verified load-bearing against a disabled-refresh baseline); `docs/platforms.rst` documents the semantics. |
 | Private resource-tracker API | Done | All segment open/create paths go through `_attach_segment()`, which uses the public `track=False` argument on Python 3.13+ and only falls back to the private `resource_tracker.unregister` on <=3.12. Tests assert the capability probe matches the `SharedMemory` signature and that `_attach_segment` branches correctly (track-false path never unregisters; fallback path does). The pickled CUDA reduction trust boundary is a separate, still-open item. |
+| Fault testing: metadata/kills/contention | Done (CPU scope) | Added CPU regression tests for a truncated metadata segment (clean rejection), repeated writer kills each recovering to `InconsistentStreamError` then repairing, and concurrent multi-writer/reader contention proving no torn seqlock snapshots and no deadlock (stable across 10 repeats). Fork inheritance and CUDA-failure-during-publication remain open (the latter is GPU-only). |
 
 ## Verification record
 
@@ -66,8 +67,9 @@ precisely isolating that lifecycle warning remains open.
    `track=False`; the remaining work is the pickle trust boundary (data-only or
    authenticated CUDA handle schema) and any residual private PyTorch reduction
    internals.
-5. Expand fault testing: malformed metadata, fork inheritance, CUDA failure
-   during publication, repeated writer kills, and prolonged contention stress.
+5. Expand fault testing. Malformed/truncated metadata, repeated writer kills,
+   and multi-writer contention now have CPU regression tests. Fork inheritance
+   and CUDA-failure-during-publication remain (the latter needs GPU hardware).
 
 ### P1 product and validation
 

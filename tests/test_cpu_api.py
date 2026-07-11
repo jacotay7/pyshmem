@@ -826,6 +826,25 @@ def test_open_rejects_data_segment_size_mismatch(shm_name):
         pyshmem.unlink(shm_name)
 
 
+def test_open_rejects_truncated_metadata_segment(shm_name):
+    from multiprocessing import shared_memory
+
+    # A metadata segment smaller than the header must fail cleanly rather than
+    # crash when open() constructs a view over it.
+    meta = shared_memory.SharedMemory(
+        name=pyshmem_shared._metadata_name(shm_name), create=True, size=64
+    )
+    pyshmem_shared._unregister(meta)
+    try:
+        with pytest.raises(
+            ValueError, match="supported pyshmem metadata block"
+        ):
+            pyshmem.open(shm_name)
+    finally:
+        meta.close()
+        meta.unlink()
+
+
 @pytest.mark.parametrize("field", ["count", "write_sequence"])
 def test_hot_path_counters_are_8_byte_aligned(field):
     """The documented memory model relies on single-copy atomicity of the
@@ -1592,6 +1611,80 @@ def test_reader_detects_writer_process_crash_mid_write(shm_name):
     shm.write(np.array([8.0, 9.0], dtype=np.float32))
     np.testing.assert_array_equal(shm.read(), [8.0, 9.0])
     shm.close()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="crash recovery relies on POSIX process-shared locks",
+)
+def test_repeated_writer_kills_recover_each_time(shm_name):
+    shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    context = mp.get_context("spawn")
+    try:
+        for i in range(3):
+            event = context.Event()
+            process = context.Process(
+                target=_crash_during_write, args=(shm_name, event)
+            )
+            process.start()
+            assert event.wait(timeout=5)
+            process.join(timeout=20)
+            assert process.exitcode == 0
+
+            with pytest.raises(pyshmem.InconsistentStreamError):
+                shm.read(timeout=1.0)
+
+            payload = np.array([float(i), float(i + 1)], dtype=np.float32)
+            shm.write(payload)
+            np.testing.assert_array_equal(shm.read(), payload)
+    finally:
+        shm.close()
+
+
+def test_concurrent_writers_and_reader_stay_consistent(shm_name):
+    shm = pyshmem.create(shm_name, shape=(128,), dtype=np.int64)
+    stop = threading.Event()
+    errors: list[str] = []
+
+    def writer(value: int) -> None:
+        handle = pyshmem.open(shm_name)
+        try:
+            payload = np.full(128, value, dtype=np.int64)
+            while not stop.is_set():
+                handle.write(payload)
+        except Exception as exc:  # pragma: no cover - surfaced via assert
+            errors.append(f"writer {value}: {exc!r}")
+        finally:
+            handle.close()
+
+    threads = [
+        threading.Thread(target=writer, args=(value,))
+        for value in (1, 2, 3, 4)
+    ]
+    for thread in threads:
+        thread.start()
+
+    reader = pyshmem.open(shm_name)
+    deadline = time.monotonic() + 1.0
+    reads = 0
+    try:
+        while time.monotonic() < deadline:
+            snapshot = reader.read()
+            # A seqlock snapshot must never mix two writers' payloads.
+            if not np.all(snapshot == snapshot[0]):
+                errors.append("torn snapshot")
+                break
+            reads += 1
+    finally:
+        stop.set()
+        for thread in threads:
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "writer thread deadlocked"
+        reader.close()
+        shm.close()
+
+    assert errors == []
+    assert reads > 0
 
 
 def test_read_timeout_bounds_in_progress_write(shm_name):
