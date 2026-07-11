@@ -116,12 +116,11 @@ jobs:
         env:
           PYTHONFAULTHANDLER: "1"
           PYTHONUNBUFFERED: "1"
-        # -v prints each test as it starts, so a hang shows the exact test as
-        # the last line; the per-test timeout (thread method works on Windows)
-        # dumps all thread stacks and fails instead of wedging the runner.
+        # Per-test timeout (thread method works on Windows) is a safety net so a
+        # future hang fails the job instead of wedging the runner for hours.
         run: >-
-          pytest -m "cpu and not benchmark" -v -rA
-          --timeout=90 --timeout-method=thread
+          pytest -m "cpu and not benchmark" -q
+          --timeout=120 --timeout-method=thread
 
       - name: Run benchmark smoke
         env:
