@@ -77,6 +77,10 @@ Behaviour:
 
 - No CPU mirror is maintained.  Every write goes straight to the CUDA tensor.
 - Fastest path — avoids the GPU→CPU copy on every write.
+- NumPy arrays and CPU tensors copy directly into shared CUDA storage without a
+  temporary CUDA tensor and second device-to-device copy. Writes remain
+  synchronous; pageable inputs are not automatically staged through pinned
+  memory.
 - A process without access to the stream's CUDA device cannot read it: there is
   no mirror to fall back on, so :func:`~pyshmem.open` raises a clear error.
 - Intended for GPU-heavy pipelines where throughput matters most.

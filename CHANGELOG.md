@@ -19,6 +19,8 @@ All notable user-facing changes are documented here. The project follows
   minimum and newest supported Python versions.
 - Reworked README into a concise project, quick-start, installation,
   performance, license, and contact landing page linked to detailed docs.
+- Removed a temporary CUDA allocation and extra device copy from NumPy/CPU
+  writes by copying directly into shared GPU storage.
 
 ## 1.0.5
 

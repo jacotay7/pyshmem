@@ -1011,6 +1011,11 @@ def _torch_dtype_for(dtype: np.dtype):
     return torch_dtype
 
 
+def _gpu_write_source(value: Any, torch_dtype):
+    """Convert a write value without eagerly uploading host data to CUDA."""
+    return torch.as_tensor(value, dtype=torch_dtype)
+
+
 def _resolve_open_target_device(
     name: str,
     device_index: int,
@@ -2067,9 +2072,7 @@ class SharedMemory:
         tensor = None
         array = None
         if self._gpu_tensor is not None:
-            tensor = torch.as_tensor(
-                value, dtype=self._torch_dtype, device=self.gpu_device
-            )
+            tensor = _gpu_write_source(value, self._torch_dtype)
             if tuple(tensor.shape) != self.shape:
                 message = (
                     f"expected shape {self.shape}, got {tuple(tensor.shape)}"
@@ -2093,6 +2096,8 @@ class SharedMemory:
             self._mark_write_started()
             try:
                 if tensor is not None:
+                    # A CPU source copies directly into shared CUDA storage;
+                    # avoid a temporary GPU allocation and second D2D copy.
                     self._gpu_tensor.copy_(tensor)
                     if self.cpu_mirror:
                         np.copyto(self._array, tensor.detach().cpu().numpy())
@@ -2244,9 +2249,7 @@ class SharedMemory:
                 "write_locked() requires an active 'with shm.locked()' block"
             )
         if self._gpu_tensor is not None:
-            tensor = torch.as_tensor(
-                value, dtype=self._torch_dtype, device=self.gpu_device
-            )
+            tensor = _gpu_write_source(value, self._torch_dtype)
             if tuple(tensor.shape) != self.shape:
                 raise ValueError(
                     f"expected shape {self.shape}, got {tuple(tensor.shape)}"

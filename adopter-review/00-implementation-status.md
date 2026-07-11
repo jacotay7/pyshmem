@@ -44,6 +44,7 @@ surface is Linux and macOS; CUDA support is Linux-only.
 | Dependency/security automation | Done | Dependabot tracks Python and GitHub Actions updates; CI runs strict `pip-audit` against installed runtime dependencies; CodeQL runs on pushes, pull requests, and weekly. Repository-host settings such as secret scanning remain external. |
 | Release artifact gating | Done | The PyPI workflow builds once, validates distributions, then installs and runs the CPU suite against that exact wheel on Python 3.9 and 3.13. OIDC publishing depends on both wheel-test jobs succeeding. |
 | README as adopter landing page | Done | Replaced the 462-line duplicated manual with a concise overview, CPU/GPU quick start, installation, reproducible performance summary, and license/contact sections. Each section links to the authoritative detailed docs. |
+| Direct host-to-shared-GPU writes | Done | NumPy/CPU values remain host tensors until `shared_cuda_tensor.copy_`, eliminating the temporary GPU allocation and extra D2D copy. A regression test checks zero-copy NumPy wrapping on CPU; a 4 MB local probe improved from the audited 186.25 us to median 171.70 us. Reusable pinned staging remains open. |
 
 ## Verification record
 
@@ -95,7 +96,8 @@ precisely isolating that lifecycle warning remains open.
 
 1. Add CUDA stream/event-aware asynchronous operations and avoid whole-device
    synchronization.
-2. Add reusable pinned staging buffers and direct host-to-shared-GPU copies.
+2. Add reusable pinned staging buffers. Direct host-to-shared-GPU copies now
+   avoid the former temporary GPU tensor and extra D2D copy.
 3. Replace polling with waitable notifications plus an optional adaptive spin
    policy.
 4. Add DLPack/array-interface adapters, capability-driven dtype support,

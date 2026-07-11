@@ -23,6 +23,13 @@ CUDA_AVAILABLE = pyshmem.gpu_available()
 TEST_SRC_PATH = str(Path(__file__).resolve().parents[1] / "src")
 
 
+def test_numpy_gpu_write_source_stays_on_cpu():
+    source = np.arange(4, dtype=np.float32)
+    tensor = pyshmem_shared._gpu_write_source(source, torch.float32)
+    assert tensor.device.type == "cpu"
+    assert tensor.data_ptr() == source.ctypes.data
+
+
 def _run_python_child(code: str) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     pythonpath = env.get("PYTHONPATH")
