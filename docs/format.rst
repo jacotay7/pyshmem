@@ -35,7 +35,7 @@ updated counters are aligned to eight-byte boundaries.
    * - flags
      - 12
      - uint32
-     - GPU, CPU-mirror, instance-id, and header-CRC feature bits
+     - GPU, CPU-mirror, instance-id, header-CRC, and notify feature bits
    * - dtype_code
      - 16
      - uint16

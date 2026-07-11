@@ -52,6 +52,7 @@ surface is Linux and macOS; CUDA support is Linux-only.
 | Metadata checksum / authenticated header | Done | New v3 streams stamp a `header_crc` CRC-32 (behind a feature flag) over the immutable header fields plus the name region; mutating counters and lock fields are excluded so writes never invalidate it. Open, discovery, and purge validate it as a final backstop after the granular field checks, rejecting silent bit-flips or torn header writes that leave every field individually plausible. Backward compatible with v2 and pre-flag v3. Regression tests cover stamping, survival across writes/locking, silent-bitflip rejection on open, the flag-required rule, and discovery ignoring a corrupt header. |
 | Producer heartbeat / staleness metadata | Done | Consumers can query data freshness and producer liveness without a producer-side heartbeat thread, reusing the per-write `write_time` stamp and recorded creator PID: `SharedMemory.age` (seconds since last write, `inf` if never written), `is_stale(max_age)`, `producer_alive()` (best-effort single-host PID liveness), and `creator_pid`; `describe()` reports them. CPU regression tests cover the never-written/fresh transitions, own-process liveness, and a spawned creator whose exit flips `producer_alive()` to `False` while data stays readable. |
 | DLPack / array-interface adapters | Done | `SharedMemory` implements the DLPack protocol (`__dlpack__` / `__dlpack_device__`), making a handle directly consumable by `np.from_dlpack`, `torch.from_dlpack`, `cupy.from_dlpack`, etc., with no framework lock-in. The export is a seqlock-consistent snapshot (safe on read-only handles, no torn reads), not a live view; live zero-copy remains available via `read(safe=False)`. CPU (numpy) and real-CUDA (RTX 5090, torch) regression tests cover round-trip, on-device export, snapshot independence from later writes, read-only export, and closed-handle rejection. |
+| Waitable notifications (futex) | Done | Opt-in `create(..., notify=True)` (behind a metadata feature flag) replaces the busy-poll wait in `read_new`/`read_new_async` with a Linux futex on the shared `write_sequence` word: writers wake parked consumers the instant they publish, so consumers sleep in the kernel instead of spinning. Non-private futex ops key on the physical page, so the wakeup crosses processes; a capped park preserves dead-writer detection; async offloads the kernel wait to a worker thread. Falls back to polling off Linux/big-endian. Default streams and the shmpipeline fast path are unchanged (one flag check, no syscall). Exposed via `SharedMemory.notify` and round-trips through `to_config`. CPU regression tests cover a woken parked reader, honored timeout, config/default round-trip, mid-write-crash detection under notify, and the async park path. An adaptive-spin policy on top of the futex park remains an optional refinement. |
 
 ## Verification record
 
@@ -106,8 +107,9 @@ precisely isolating that lifecycle warning remains open.
 1. Design fully asynchronous cross-process publication using IPC-capable CUDA
    events. Synchronous operations now wait only on their active stream and no
    longer synchronize the whole device.
-2. Replace polling with waitable notifications plus an optional adaptive spin
-   policy.
+2. Waitable notifications are implemented as opt-in `notify=True` Linux futex
+   wakeups (polling fallback elsewhere). An optional adaptive spin policy layered
+   on top of the futex park remains a future refinement.
 3. Add DLPack/array-interface adapters, namespaces, read-only handles, and
    producer heartbeat/staleness metadata. Dtype support is now capability-driven.
 4. Split the implementation by format, synchronization, lifecycle, CPU backend,

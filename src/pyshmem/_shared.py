@@ -28,6 +28,7 @@ import os
 import platform
 import secrets
 import pickle
+import sys
 import tempfile
 import threading
 import time
@@ -100,6 +101,7 @@ METADATA_FLAG_GPU_ENABLED = 1 << 0
 METADATA_FLAG_CPU_MIRROR_ENABLED = 1 << 1
 METADATA_FLAG_INSTANCE_ID = 1 << 2
 METADATA_FLAG_HEADER_CRC = 1 << 3
+METADATA_FLAG_NOTIFY = 1 << 4
 METADATA_V3_DTYPE = np.dtype(
     {
         "names": [
@@ -225,6 +227,66 @@ def _load_native_atomics() -> _LibAtomic | None:
 
 
 _NATIVE_ATOMICS = _load_native_atomics()
+
+# Opt-in waitable notifications use a Linux futex on the shared
+# ``write_sequence`` word so consumers park in the kernel instead of busy
+# polling and wake the instant a producer publishes.  Non-private futex ops key
+# on the physical page, so they work across processes that map the same segment
+# at different virtual addresses.  The word is the little-endian low 32 bits of
+# ``write_sequence``, which changes on every publication, so the futex
+# compare-and-block is race free.  Unavailable off Linux / on big-endian, where
+# callers fall back to polling.  Parked waits are capped so dead-writer/invalid
+# detection still runs.
+_NOTIFY_MAX_PARK = 0.05
+_FUTEX_WAIT = 0
+_FUTEX_WAKE = 1
+if sys.platform == "linux" and sys.byteorder == "little":
+    _SYS_FUTEX = {"x86_64": 202, "amd64": 202, "aarch64": 98}.get(
+        platform.machine().lower()
+    )
+else:
+    _SYS_FUTEX = None
+_FUTEX_AVAILABLE = _SYS_FUTEX is not None
+
+if _FUTEX_AVAILABLE:
+    _LIBC = ctypes.CDLL(None, use_errno=True)
+    _LIBC.syscall.restype = ctypes.c_long
+
+    class _timespec(ctypes.Structure):
+        _fields_ = [("tv_sec", ctypes.c_long), ("tv_nsec", ctypes.c_long)]
+
+    def _futex_wait(addr: int, expected: int, timeout: float) -> None:
+        seconds = int(timeout)
+        ts = _timespec(seconds, int((timeout - seconds) * 1_000_000_000))
+        _LIBC.syscall(
+            ctypes.c_long(_SYS_FUTEX),
+            ctypes.c_void_p(addr),
+            ctypes.c_int(_FUTEX_WAIT),
+            ctypes.c_uint32(expected & 0xFFFFFFFF),
+            ctypes.byref(ts),
+            ctypes.c_void_p(0),
+            ctypes.c_int(0),
+        )
+
+    def _futex_wake(addr: int, count: int = 2**31 - 1) -> None:
+        _LIBC.syscall(
+            ctypes.c_long(_SYS_FUTEX),
+            ctypes.c_void_p(addr),
+            ctypes.c_int(_FUTEX_WAKE),
+            ctypes.c_int(count),
+            ctypes.c_void_p(0),
+            ctypes.c_void_p(0),
+            ctypes.c_int(0),
+        )
+
+else:  # pragma: no cover - exercised only on non-futex platforms
+
+    def _futex_wait(addr: int, expected: int, timeout: float) -> None:
+        time.sleep(min(timeout, _NOTIFY_MAX_PARK))
+
+    def _futex_wake(addr: int, count: int = 0) -> None:
+        pass
+
 
 _THREAD_LOCK_GUARD = threading.Lock()
 _THREAD_LOCKS: dict[str, "_SharedLockState"] = {}
@@ -913,6 +975,7 @@ def _decode_metadata_header(
             | METADATA_FLAG_CPU_MIRROR_ENABLED
             | METADATA_FLAG_INSTANCE_ID
             | METADATA_FLAG_HEADER_CRC
+            | METADATA_FLAG_NOTIFY
         )
         if flags & ~known_flags:
             raise ValueError(f"unsupported metadata flags: 0x{flags:x}")
@@ -1399,6 +1462,18 @@ class SharedMemory:
             self.shape, dtype=self.dtype, buffer=self._data_shm.buf
         )
         self._metadata = _MetadataView(self._metadata_shm.buf)
+        # Waitable notifications are opt-in per stream (the NOTIFY flag) and
+        # only active where a futex is available; otherwise waiters poll.
+        self._notify = (
+            _FUTEX_AVAILABLE
+            and self._metadata._v3 is not None
+            and bool(self._metadata._flags() & METADATA_FLAG_NOTIFY)
+        )
+        self._seq_word_addr = (
+            self._metadata._atomic_address("write_sequence")
+            if self._notify
+            else None
+        )
         self._gpu_tensor = gpu_tensor
         self._torch_dtype = torch_dtype
         self._pinned_staging = None
@@ -1414,6 +1489,15 @@ class SharedMemory:
     def instance_id(self) -> str | None:
         """Return the stream generation's hex identifier, if present."""
         return None if self._instance_id is None else self._instance_id.hex()
+
+    @property
+    def notify(self) -> bool:
+        """Return whether kernel waitable notifications are active here.
+
+        ``True`` only when the stream was created with ``notify=True`` *and* a
+        futex is available on this platform; otherwise waiters poll.
+        """
+        return self._notify
 
     def __repr__(self) -> str:
         dtype_name = str(self.dtype)
@@ -1637,6 +1721,8 @@ class SharedMemory:
         self._metadata[METADATA_INDEX_WRITE_TIME] = time.time()
         self._metadata.store_count_release(count)
         self._metadata.store_sequence_release(sequence)
+        if self._notify:
+            _futex_wake(self._seq_word_addr)
 
     def _mark_write_started(self) -> None:
         sequence = self._metadata.load_sequence_acquire()
@@ -1656,6 +1742,54 @@ class SharedMemory:
         sequence = self._metadata.load_sequence_acquire()
         if sequence >= 0:
             self._metadata.store_sequence_release(-max(sequence, 1))
+        if self._notify:
+            _futex_wake(self._seq_word_addr)
+
+    def _park_cap(self, remaining: float | None) -> float:
+        return (
+            _NOTIFY_MAX_PARK
+            if remaining is None
+            else min(remaining, _NOTIFY_MAX_PARK)
+        )
+
+    def _park_once(self, cap: float) -> None:
+        # Read the futex word immediately before waiting so a publication that
+        # lands in this window changes the word and makes the kernel's compare-
+        # and-block return at once instead of sleeping (no lost wakeup).
+        word = ctypes.c_uint32.from_address(self._seq_word_addr).value
+        _futex_wait(self._seq_word_addr, word, cap)
+
+    def _wait_for_publication(
+        self, poll_interval: float, remaining: float | None
+    ) -> None:
+        """Wait one step for a new publication.
+
+        On notify-enabled streams this parks in the kernel on the shared
+        ``write_sequence`` word (waking the instant a producer publishes, or
+        after a capped interval so dead-writer detection still runs); otherwise
+        it sleeps for ``poll_interval``.
+        """
+        if self._notify and self._seq_word_addr is not None:
+            cap = self._park_cap(remaining)
+            if cap > 0:
+                self._park_once(cap)
+        else:
+            time.sleep(poll_interval)
+
+    async def _wait_for_publication_async(
+        self, poll_interval: float, remaining: float | None
+    ) -> None:
+        """Async counterpart of :meth:`_wait_for_publication`.
+
+        The blocking futex park is offloaded to a worker thread so it never
+        stalls the event loop.
+        """
+        if self._notify and self._seq_word_addr is not None:
+            cap = self._park_cap(remaining)
+            if cap > 0:
+                await asyncio.to_thread(self._park_once, cap)
+        else:
+            await asyncio.sleep(poll_interval)
 
     def _lock_metadata_on_acquire(self) -> None:
         self._metadata[METADATA_INDEX_LOCK_OWNER_PID] = os.getpid()
@@ -1852,6 +1986,7 @@ class SharedMemory:
         size: int | None = None,
         gpu_device: str | int | None = None,
         cpu_mirror: bool | None = None,
+        notify: bool = False,
     ) -> "SharedMemory":
         _encode_stream_name(name)  # validate length before allocating segments
         normalized_shape = _normalize_shape(shape)
@@ -1926,6 +2061,10 @@ class SharedMemory:
             metadata[METADATA_INDEX_CPU_MIRROR_ENABLED] = (
                 1 if cpu_mirror_enabled else 0
             )
+            if notify:
+                metadata._v3["flags"] = (
+                    int(metadata._v3["flags"]) | METADATA_FLAG_NOTIFY
+                )
             for index, axis in enumerate(normalized_shape):
                 metadata[METADATA_INDEX_SHAPE_START + index] = axis
             _write_stream_name(metadata_shm, name)
@@ -2353,7 +2492,12 @@ class SharedMemory:
                     raise TimeoutError(
                         f"timed out waiting for a new write on {self.name!r}"
                     )
-                time.sleep(poll_interval)
+                remaining = (
+                    None
+                    if timeout is None
+                    else max(0.0, float(timeout) - (time.monotonic() - start))
+                )
+                self._wait_for_publication(poll_interval, remaining)
                 continue
             remaining = (
                 None
@@ -2384,7 +2528,12 @@ class SharedMemory:
                 raise TimeoutError(
                     f"timed out waiting for a new write on {self.name!r}"
                 )
-            time.sleep(poll_interval)
+            remaining = (
+                None
+                if timeout is None
+                else max(0.0, float(timeout) - (time.monotonic() - start))
+            )
+            self._wait_for_publication(poll_interval, remaining)
         remaining = (
             None
             if timeout is None
@@ -2471,7 +2620,15 @@ class SharedMemory:
                     raise TimeoutError(
                         f"timed out waiting for a new write on {self.name!r}"
                     )
-                await asyncio.sleep(poll_interval)
+                elapsed = time.monotonic() - start
+                remaining = (
+                    None
+                    if timeout is None
+                    else max(0.0, float(timeout) - elapsed)
+                )
+                await self._wait_for_publication_async(
+                    poll_interval, remaining
+                )
                 continue
             remaining = (
                 None
@@ -2504,7 +2661,12 @@ class SharedMemory:
                 raise TimeoutError(
                     f"timed out waiting for a new write on {self.name!r}"
                 )
-            await asyncio.sleep(poll_interval)
+            remaining = (
+                None
+                if timeout is None
+                else max(0.0, float(timeout) - (time.monotonic() - start))
+            )
+            await self._wait_for_publication_async(poll_interval, remaining)
         remaining = (
             None
             if timeout is None
@@ -2531,6 +2693,7 @@ class SharedMemory:
             f"creator_pid:  {self.creator_pid}",
             f"producer:     {'alive' if self.producer_alive() else 'dead'}",
             f"age:          {self.age:.3f} s",
+            f"notify:       {self.notify}",
         ]
         return "\n".join(lines)
 
@@ -2546,6 +2709,12 @@ class SharedMemory:
             "dtype": str(self.dtype),
             "gpu_device": self.gpu_device,
             "cpu_mirror": self.cpu_mirror,
+            # Capture the stored intent (the flag), not the platform-derived
+            # active state, so it round-trips even on non-futex hosts.
+            "notify": bool(
+                self._metadata._v3 is not None
+                and self._metadata._flags() & METADATA_FLAG_NOTIFY
+            ),
         }
 
     @classmethod
@@ -2562,6 +2731,7 @@ class SharedMemory:
             dtype=config.get("dtype", "float32"),
             gpu_device=config.get("gpu_device"),
             cpu_mirror=config.get("cpu_mirror"),
+            notify=config.get("notify", False),
         )
 
     def __dlpack_device__(self) -> tuple[int, int]:
@@ -2742,6 +2912,7 @@ def create(
     gpu_device: str | int | None = None,
     cpu_mirror: bool | None = None,
     auto_unlink: bool = False,
+    notify: bool = False,
 ) -> SharedMemory:
     """Create a new named shared-memory stream.
 
@@ -2766,6 +2937,12 @@ def create(
         a context manager.  Equivalent to calling :meth:`~SharedMemory.unlink`
         instead of :meth:`~SharedMemory.close` on ``__exit__``.  See also the
         :func:`stream` helper which sets this flag automatically.
+    notify:
+        When ``True`` the stream supports kernel-level waitable notifications:
+        writers wake parked :meth:`~SharedMemory.read_new` consumers the moment
+        they publish (Linux futex), instead of the consumers busy-polling. It
+        falls back to polling on non-Linux/big-endian platforms. Opt-in because
+        it adds one wakeup syscall per write; default streams are unaffected.
     """
     # Keep the name lock inode stable across generations and serialize the
     # metadata/data replacement with handle-level unlink checks.
@@ -2777,6 +2954,7 @@ def create(
             size=size,
             gpu_device=gpu_device,
             cpu_mirror=cpu_mirror,
+            notify=notify,
         )
     shm._auto_unlink = auto_unlink
     return shm

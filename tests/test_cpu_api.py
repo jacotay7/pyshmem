@@ -1033,6 +1033,103 @@ def test_dlpack_on_closed_handle_raises(shm_name):
         shm.__dlpack_device__()
 
 
+def test_notify_defaults_off_and_config_roundtrips(shm_name):
+    default = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    try:
+        assert default.notify is False
+        assert default.to_config().get("notify") is False
+    finally:
+        default.unlink()
+
+    notified = pyshmem.create(
+        shm_name, shape=(2,), dtype=np.float32, notify=True
+    )
+    try:
+        # notify is active only where a futex is available.
+        assert notified.notify is pyshmem_shared._FUTEX_AVAILABLE
+        cfg = notified.to_config()
+        assert cfg["notify"] is True  # stored intent, platform-independent
+        assert "notify:" in notified.describe()
+    finally:
+        notified.unlink()
+
+    rebuilt = pyshmem.SharedMemory.create_from_config(cfg)
+    try:
+        assert rebuilt.notify is pyshmem_shared._FUTEX_AVAILABLE
+        reopened = pyshmem.open(shm_name)
+        try:
+            assert reopened.notify is pyshmem_shared._FUTEX_AVAILABLE
+        finally:
+            reopened.close()
+    finally:
+        rebuilt.unlink()
+
+
+def test_notify_wakes_parked_reader(shm_name):
+    writer = pyshmem.create(
+        shm_name, shape=(2,), dtype=np.float32, notify=True
+    )
+    reader = pyshmem.open(shm_name)
+    result = {}
+
+    def consume():
+        payload = reader.read_new(timeout=5.0)
+        result["value"] = payload.tolist()
+
+    thread = threading.Thread(target=consume)
+    thread.start()
+    try:
+        time.sleep(0.2)  # let the consumer park in the kernel
+        writer.write(np.array([7, 8], dtype=np.float32))
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "parked reader was not woken"
+        assert result["value"] == [7.0, 8.0]
+    finally:
+        thread.join(timeout=5.0)
+        reader.close()
+        writer.unlink()
+
+
+def test_notify_read_new_timeout_is_honored(shm_name):
+    writer = pyshmem.create(
+        shm_name, shape=(2,), dtype=np.float32, notify=True
+    )
+    reader = pyshmem.open(shm_name)
+    try:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            reader.read_new(timeout=0.2)
+        assert time.monotonic() - started < 2.0
+    finally:
+        reader.close()
+        writer.unlink()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="crash recovery relies on POSIX process-shared locks",
+)
+def test_notify_read_new_detects_writer_crash_mid_write(shm_name):
+    # A parked read_new must not hang forever on a producer that died holding
+    # an odd (write-in-progress) sequence; the capped park lets dead-writer
+    # detection surface InconsistentStreamError.
+    shm = pyshmem.create(shm_name, shape=(2,), dtype=np.float32, notify=True)
+    context = mp.get_context("spawn")
+    event = context.Event()
+    process = context.Process(
+        target=_crash_during_write, args=(shm_name, event)
+    )
+    process.start()
+    assert event.wait(timeout=5)
+    process.join(timeout=20)
+    assert process.exitcode == 0
+    try:
+        with pytest.raises(pyshmem.InconsistentStreamError, match="exited"):
+            shm.read_new(timeout=2.0)
+    finally:
+        shm.unlink()
+
+
 def test_open_rejects_data_segment_size_mismatch(shm_name):
     from multiprocessing import shared_memory
 
@@ -1643,6 +1740,32 @@ def test_read_new_async_returns_new_payload(shm_name):
 
     reader.close()
     writer.close()
+
+
+def test_read_new_async_returns_new_payload_on_notify_stream(shm_name):
+    # Exercises the async futex-park path: the offloaded kernel wait must not
+    # block the event loop and must still deliver the payload.
+    writer = pyshmem.create(
+        shm_name, shape=(2,), dtype=np.float32, notify=True
+    )
+    reader = pyshmem.open(shm_name)
+    writer.write(np.zeros(2, dtype=np.float32))
+
+    async def _run():
+        def delayed_write() -> None:
+            time.sleep(0.05)
+            writer.write(np.array([5.0, 6.0], dtype=np.float32))
+
+        thread = threading.Thread(target=delayed_write)
+        thread.start()
+        result = await reader.read_new_async(timeout=1.0)
+        thread.join()
+        np.testing.assert_array_equal(result, [5.0, 6.0])
+
+    asyncio.run(_run())
+
+    reader.close()
+    writer.unlink()
 
 
 def test_read_new_async_times_out_when_no_write_arrives(shm_name):

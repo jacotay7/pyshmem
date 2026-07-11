@@ -55,6 +55,8 @@ import pyshmem
 shm = pyshmem.create("my_stream", shape=(100,), dtype="float32")
 shm = pyshmem.create("my_gpu_stream", shape=(100,), dtype="float32",
                       gpu_device="cuda:0", cpu_mirror=False)
+# opt-in kernel wakeups: writers wake parked read_new consumers via a futex
+shm = pyshmem.create("frames", shape=(480, 640), notify=True)
 # auto-unlink on context exit
 shm = pyshmem.create("tmp", shape=(10,), auto_unlink=True)
 with pyshmem.stream("tmp2", shape=(10,)) as shm:   # always auto-unlinks
@@ -137,6 +139,7 @@ pyshmem purge --include-cuda-orphans  # additionally sweep global dead-producer 
 - **`create()`** calls `SharedMemory._create()` which creates segments atomically (with cleanup on failure).
 - **`open()`** calls `SharedMemory._open()` which reads metadata to reconstruct shape/dtype without needing the caller to know them.
 - **`open()` device resolution** (`_resolve_open_target_device`): omitting `gpu_device` auto-attaches to the stored device (`METADATA_INDEX_DEVICE_INDEX`); if that can't attach it falls back to the CPU mirror when one exists, else raises. An explicit `gpu_device=` must match the stored device and raises (no fallback) if it can't attach. `gpu_device=False` skips CUDA entirely and reads the host mirror as NumPy (requires `cpu_mirror=True`, else `ValueError`).
+- **Waitable notifications** (`create(..., notify=True)`, `METADATA_FLAG_NOTIFY`): opt-in per-stream. `_finish_write`/`_abort_write` call `_futex_wake` on the shared `write_sequence` word when `self._notify`; `read_new`/`read_new_async` park via `_futex_wait` (`_wait_for_publication`) instead of `time.sleep`. Non-private Linux futex keys on the physical page (works cross-process at different vaddrs); the word is the LE low 32 bits of `write_sequence`, which changes every publication, so the compare-and-block is race-free. Parked waits are capped at `_NOTIFY_MAX_PARK` (50 ms) so dead-writer detection still runs. `_FUTEX_AVAILABLE` is Linux + little-endian only; elsewhere it falls back to polling. `self._notify` is derived from the metadata flag in `__init__`, so **default streams (incl. shmpipeline's) hit only one `if self._notify` check and no syscall.**
 - **`readonly=True` handles** (`open(..., readonly=True)`): a per-handle guard (`_ensure_writable`) makes every mutating operation raise `PermissionError` — `write`, `write_locked`, `clear`, `acquire`/`locked`, `pinned_buffer`, unsafe (`safe=False`) reads, and handle-level `unlink`. It does not protect the segment: other writable handles to the same stream (and the owner) still publish. `describe()` reports the `readonly` flag.
 - **Resource tracker suppression**: segments are opened through `_attach_segment()`, which passes the public `track=False` on Python 3.13+ (so they are never registered) and otherwise falls back to constructing the segment and calling `_unregister()` (the private `resource_tracker.unregister` reach-in). Either way child process exits don't spuriously warn about leaked shared memory.
 - **Platform**: POSIX only (Linux and macOS). Full Linux support; macOS works but GPU IPC is not tested there. Windows is **not supported** (no POSIX shared-memory persistence / process-shared locks) and is excluded from CI.

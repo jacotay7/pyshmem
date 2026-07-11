@@ -44,6 +44,10 @@ All notable user-facing changes are documented here. The project follows
   directly consumable by `np.from_dlpack`, `torch.from_dlpack`,
   `cupy.from_dlpack`, etc. The export is a seqlock-consistent snapshot (safe on
   read-only handles), not a live view.
+- Added opt-in waitable notifications: `create(..., notify=True)` makes writers
+  wake parked `read_new`/`read_new_async` consumers via a Linux futex instead of
+  busy-polling (with a polling fallback off Linux/big-endian). Exposed via the
+  `SharedMemory.notify` property; default streams are unaffected.
 
 ## 1.0.5
 

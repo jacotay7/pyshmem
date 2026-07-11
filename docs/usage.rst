@@ -274,6 +274,35 @@ is not blocked while waiting:
 
    asyncio.run(consumer())
 
+Waitable notifications
+~~~~~~~~~~~~~~~~~~~~~~~
+
+By default a waiting :meth:`~pyshmem.SharedMemory.read_new` busy-polls the
+publication counter.  For low-latency, low-CPU waiting, create the stream with
+``notify=True``: writers then wake parked consumers through a Linux futex on the
+shared sequence word the instant they publish, so consumers sleep in the kernel
+instead of spinning.
+
+.. code-block:: python
+
+   writer = pyshmem.create("frames", shape=(480, 640), notify=True)
+   reader = pyshmem.open("frames")     # inherits the stream's notify setting
+
+   frame = reader.read_new(timeout=5.0)   # parks in the kernel, wakes on publish
+
+The setting is a property of the **stream**, so every handle that opens it
+participates automatically; ``shm.notify`` reports whether notifications are
+active on this handle.  It is opt-in because each write on a notify stream costs
+one extra wakeup syscall — default streams are completely unaffected.
+
+Notifications are a **latency/CPU optimization only**; semantics are identical
+to a polling ``read_new``.  On platforms without a suitable futex (non-Linux, or
+big-endian) the stream still works and simply falls back to polling.  Parked
+waits are internally capped so a producer that dies mid-write is still detected
+(surfacing :class:`~pyshmem.InconsistentStreamError`) rather than blocking
+forever.  ``read_new_async`` also benefits: the kernel wait is offloaded to a
+worker thread so the event loop is never blocked.
+
 Locking
 -------
 
