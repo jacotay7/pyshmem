@@ -176,8 +176,7 @@ docs/             # Sphinx sources (format.rst is the authoritative on-disk form
 ```
 
 Other tracked docs: `README.md` (adopter landing page), `CHANGELOG.md`,
-`CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `IMPROVEMENTS.md`,
-`adopter-review/` (audit-remediation status).
+`CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `IMPROVEMENTS.md`.
 
 ## Running Tests
 
@@ -227,7 +226,7 @@ python -m pytest tests/test_cpu_api.py -q   # must be green before any merge
 
 ## Package Info
 
-- Package name on PyPI: `pyshmem` (v1.0.5)
+- Package name on PyPI: `pyshmem` (v1.0.6)
 - License: GPL-3.0-only
 - Required deps: `numpy>=1.26,<3`, `portalocker>=3.1`
 - Optional deps: `torch>=2.2` (GPU support)

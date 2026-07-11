@@ -99,10 +99,9 @@ python benchmarks/benchmark_ipc.py \
   --payload-bytes 65536 --minimum-seconds 1 --repeats 5 --gpu
 ```
 
-See the [benchmark documentation](https://pyshmem.readthedocs.io/en/latest/benchmarks.html),
-[versioned result](benchmarks/results/rtx5090-linux-2026-07-10.json), and
-[performance audit](adopter-review/03-performance.md) for methodology, broader
-CPU/GPU measurements, limitations, and optimization opportunities.
+See the [benchmark documentation](https://pyshmem.readthedocs.io/en/latest/benchmarks.html)
+and the [versioned result](benchmarks/results/rtx5090-linux-2026-07-10.json) for
+methodology, CPU/GPU measurements, and limitations.
 
 ## License and contact
 
