@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from importlib.metadata import version as distribution_version
 
 
 ROOT = os.path.abspath("..")
@@ -11,7 +12,7 @@ sys.path.insert(0, SRC)
 project = "pyshmem"
 author = "Jacob Taylor"
 copyright = "2026, Jacob Taylor"
-release = "1.0.5"
+release = distribution_version("pyshmem")
 
 extensions = [
     "myst_parser",

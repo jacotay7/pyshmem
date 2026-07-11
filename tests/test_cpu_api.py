@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from importlib.metadata import version
 import multiprocessing as mp
 import os
 from pathlib import Path
@@ -20,6 +21,10 @@ import pyshmem._shared as pyshmem_shared
 pytestmark = pytest.mark.cpu
 WINDOWS_SHARED_MEMORY_IS_EPHEMERAL = sys.platform == "win32"
 TEST_SRC_PATH = str(Path(__file__).resolve().parents[1] / "src")
+
+
+def test_public_version_matches_installed_distribution():
+    assert pyshmem.__version__ == version("pyshmem")
 
 
 def _run_python_child(code: str) -> subprocess.CompletedProcess[str]:

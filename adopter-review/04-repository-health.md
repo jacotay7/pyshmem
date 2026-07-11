@@ -15,7 +15,7 @@ Completed repository-health items from the first batch:
   result.
 
 Still open: real GPU CI, dependency/security automation, type checking,
-hosted-doc deployment, single-source versioning, release gating, and
+hosted-doc deployment, release gating, and
 architectural/private-API work. Contributor, security, support/compatibility,
 and changelog policies have now been added.
 
@@ -110,8 +110,8 @@ ordinary in-process classes.
 - The freshly built sdist includes all three test modules but omits
   `tests/conftest.py`, which supplies fixtures those tests require. It therefore
   ships a visibly incomplete test suite.
-- Version `1.0.5` is duplicated in `pyproject.toml`, `pyshmem.__init__`, and
-  `docs/conf.py`, inviting drift.
+- **Resolved:** `pyproject.toml` is the only literal version source; runtime and
+  Sphinx obtain it through `importlib.metadata`, with a regression test.
 - `IMPROVEMENTS.md` is explicitly ignored, so maintenance thinking in that file
   is not shared with adopters or contributors.
 - There is no lockfile/constraints strategy for CI. `torch>=2.2` has no upper

@@ -1,5 +1,7 @@
 """Public package surface for pyshmem."""
 
+from importlib.metadata import PackageNotFoundError, version
+
 from pyshmem._shared import (
     GPU_SUPPORTED_DTYPES,
     InconsistentStreamError,
@@ -15,7 +17,10 @@ from pyshmem._shared import (
     unlink_quiet,
 )
 
-__version__ = "1.0.5"
+try:
+    __version__ = version("pyshmem")
+except PackageNotFoundError:  # source tree imported without installation
+    __version__ = "0+unknown"
 
 __all__ = [
     "GPU_SUPPORTED_DTYPES",

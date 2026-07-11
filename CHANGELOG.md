@@ -12,6 +12,8 @@ All notable user-facing changes are documented here. The project follows
   and an OS-lock fallback.
 - Added a reproducible spawned-process IPC benchmark and versioned JSON result.
 - Added maintenance, support, security, and compatibility policies.
+- Made `pyproject.toml` package metadata the single version source used by the
+  runtime package and documentation.
 
 ## 1.0.5
 
