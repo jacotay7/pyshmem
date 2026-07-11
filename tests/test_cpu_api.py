@@ -985,6 +985,10 @@ def test_header_crc_flag_required_when_checksum_present(shm_name):
         owner.close()
 
 
+@pytest.mark.skipif(
+    sys.platform in ("win32", "darwin"),
+    reason="discovery requires /dev/shm (Linux only)",
+)
 def test_discovery_ignores_corrupt_header_crc(shm_name):
     owner = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
     header = np.ndarray(
