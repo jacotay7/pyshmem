@@ -885,7 +885,7 @@ def test_open_rejects_corrupt_v3_metadata(shm_name, field, value, message):
         owner.close()
 
 
-def test_open_rejects_nonzero_reserved_and_unused_shape(shm_name):
+def test_open_rejects_unused_shape(shm_name):
     owner = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
     header = np.ndarray(
         (),
@@ -893,16 +893,68 @@ def test_open_rejects_nonzero_reserved_and_unused_shape(shm_name):
         buffer=owner._metadata_shm.buf,
     )
     try:
-        reserved_width = pyshmem_shared.METADATA_V3_DTYPE.fields["reserved"][
-            0
-        ].itemsize
-        header["reserved"] = b"x" + b"\x00" * (reserved_width - 1)
-        with pytest.raises(ValueError, match="reserved metadata"):
-            pyshmem.open(shm_name)
-        header["reserved"] = b"\x00" * reserved_width
         header["shape"][1] = 9
         with pytest.raises(ValueError, match="unused shape"):
             pyshmem.open(shm_name)
+    finally:
+        owner.close()
+
+
+def test_frame_id_defaults_zero_and_round_trips_across_handles(shm_name):
+    owner = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
+    try:
+        assert owner.frame_id == 0
+        owner.write(np.ones(4, dtype=np.float32), frame_id=42)
+        assert owner.frame_id == 42
+        assert owner.count == 1
+        consumer = pyshmem.open(shm_name)
+        try:
+            # The token is visible to any handle that maps the segment.
+            assert consumer.frame_id == 42
+            # A write without frame_id leaves the token unchanged.
+            owner.write(np.full(4, 2.0, dtype=np.float32))
+            assert consumer.frame_id == 42
+            # write_view and write_locked also stamp the token.
+            with owner.write_view(frame_id=7) as view:
+                view[:] = 3.0
+            assert consumer.frame_id == 7
+            with owner.locked():
+                owner.write_locked(
+                    np.full(4, 5.0, dtype=np.float32), frame_id=99
+                )
+            assert consumer.frame_id == 99
+            # Full uint64 range round-trips.
+            token = 2**63 + 5
+            owner.write(np.zeros(4, dtype=np.float32), frame_id=token)
+            assert consumer.frame_id == token
+        finally:
+            consumer.close()
+    finally:
+        owner.close()
+
+
+def test_frame_id_writes_do_not_disturb_header_crc(shm_name):
+    owner = pyshmem.create(shm_name, shape=(4,), dtype=np.float32)
+    try:
+        original = int(
+            np.ndarray(
+                (),
+                dtype=pyshmem_shared.METADATA_V3_DTYPE,
+                buffer=owner._metadata_shm.buf,
+            )["header_crc"]
+        )
+        for token in range(1, 6):
+            owner.write(np.full(4, token, dtype=np.float32), frame_id=token)
+        assert int(owner.frame_id) == 5
+        # frame_id is excluded from the CRC, so stamping tokens never
+        # invalidates the stored checksum.
+        assert original == pyshmem_shared._header_crc(owner._metadata_shm.buf)
+        header = np.ndarray(
+            (),
+            dtype=pyshmem_shared.METADATA_V3_DTYPE,
+            buffer=owner._metadata_shm.buf,
+        )
+        assert int(header["header_crc"]) == original
     finally:
         owner.close()
 

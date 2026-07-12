@@ -32,6 +32,26 @@ def test_numpy_gpu_write_source_stays_on_cpu():
 
 
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_frame_id_round_trips(shm_name):
+    shm = pyshmem.create(
+        shm_name,
+        shape=(4,),
+        dtype="float32",
+        gpu_device="cuda:0",
+        cpu_mirror=False,
+    )
+    try:
+        assert shm.frame_id == 0
+        shm.write(torch.ones(4, device="cuda:0"), frame_id=123)
+        assert shm.frame_id == 123
+        with shm.write_view(frame_id=456) as view:
+            view[:] = 2.0
+        assert shm.frame_id == 456
+    finally:
+        shm.unlink()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
 @pytest.mark.parametrize(
     "dtype,values",
     [

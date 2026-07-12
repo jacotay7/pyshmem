@@ -36,6 +36,9 @@ Writers bracket payloads with odd/even sequence numbers:
 
 Readers poll until `WRITE_SEQUENCE` is even (stable), snapshot the data, then verify the sequence didn't change. This lock-free consistency mechanism is in `_read_consistent_cpu()` and `_read_consistent_gpu()`.
 
+### Frame-id publication token
+The v3 metadata header carries a user `frame_id` uint64 (the slot that was `reserved` before; excluded from the header CRC, defaults to 0, reads 0 on legacy v2). Writers pass `frame_id=` to `write()`/`write_locked()`/`write_view()`/`write_view_locked()`; `_finish_write` stamps `self._pending_frame_id` **before** the releasing sequence store, so a reader observing a stable sequence sees the matching token. Omitting `frame_id` leaves the field unchanged; `_abort_write` clears the pending token. Read it back with the `SharedMemory.frame_id` property — for a torn-free value, read it inside the same lock scope that snapshots the payload. This lets consumers establish cross-stream frame identity (e.g. a synchronized multi-camera fan-in) rather than inferring it from publication counts.
+
 ### GPU IPC
 GPU streams share tensors cross-process via torch's **official** reduction: the producer exports with `torch.multiprocessing.reductions.reduce_tensor()` (storing the pickled `(rebuild_fn, args)` in the GPU handle segment) and the consumer reconstructs with `rebuild_fn(*args)`. The consumer deserializes the segment through `_loads_cuda_handle()` / `_RestrictedCudaUnpickler`, whose `find_class` only permits torch's known CUDA rebuild globals (`_ALLOWED_CUDA_GLOBALS`) and inert dtype values, so a tampered 0600 segment raises `UnpicklingError` instead of executing arbitrary code. This is deliberate — calling `storage._share_cuda_()` / `_new_shared_cuda()` directly (the old approach) bypasses torch's `shared_cache` + IPC ref-counter bookkeeping, which **leaks the producer's GPU allocation for the process lifetime** because the counter never reaches zero. With `reduce_tensor`, the producer can reclaim memory via `torch.cuda.ipc_collect()` once consumers release.
 
@@ -233,7 +236,7 @@ python -m pytest tests/test_cpu_api.py -q   # must be green before any merge
 
 ## Package Info
 
-- Package name on PyPI: `pyshmem` (v1.1.0)
+- Package name on PyPI: `pyshmem` (v1.2.0)
 - License: GPL-3.0-only
 - Required deps: `numpy>=1.26,<3`, `portalocker>=3.1`
 - Optional deps: `torch>=2.2` (GPU support)

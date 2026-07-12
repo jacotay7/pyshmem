@@ -84,10 +84,11 @@ updated counters are aligned to eight-byte boundaries.
      - 92
      - uint32
      - CRC-32 of the immutable header fields plus the name region
-   * - reserved
+   * - frame_id
      - 96
-     - 8 bytes
-     - Must be zero; reserved for extensions
+     - uint64
+     - User publication token, stamped atomically with the write sequence
+       (0 when unset); excluded from the header CRC
    * - shape
      - 104
      - uint64[19]
@@ -111,8 +112,14 @@ created as version 3. Unknown versions, invalid v3 header sizes, and malformed
 headers are rejected rather than guessed. Version 2 support is intended for
 attaching to streams left by pyshmem 1.0.x; there is no in-place conversion.
 
+The ``frame_id`` field occupies the 8-byte slot that was a zeroed ``reserved``
+region in earlier version 3 streams. Because a freshly created stream leaves it
+zero and it is excluded from the header CRC, older readers stay compatible and
+CRCs are unchanged; a stream written by an older pyshmem simply reports
+``frame_id == 0``.
+
 Before mapping a payload, ``open()`` validates the metadata segment length,
-known flags, zeroed reserved bytes, UTF-8 name/hash relationship, dtype code,
+known flags, UTF-8 name/hash relationship, dtype code,
 dimension bounds, positive shape, zeroed unused dimensions, exact
 shape/dtype/size product, CPU/GPU device rules, creator PID, timestamps, lock
 state, and that the data segment is large enough for the declared payload.

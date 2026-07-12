@@ -121,7 +121,7 @@ METADATA_V3_DTYPE = np.dtype(
             "lock_depth",
             "instance_id",
             "header_crc",
-            "reserved",
+            "frame_id",
             "shape",
         ],
         "formats": [
@@ -141,7 +141,7 @@ METADATA_V3_DTYPE = np.dtype(
             "<u4",
             "S16",
             "<u4",
-            "V8",
+            "<u8",
             ("<u8", METADATA_SIZE - METADATA_INDEX_SHAPE_START),
         ],
         "offsets": [
@@ -178,6 +178,12 @@ _CRC_EXCLUDED_FIELDS = (
     "lock_owner_pid",
     "lock_depth",
     "header_crc",
+    # frame_id is a user-supplied publication token updated on every write, so
+    # it must be excluded like the other mutable counters.  It occupies the
+    # 8-byte slot that was reserved (and always zero) in earlier v3 streams, so
+    # a freshly created stream still hashes identically and old readers that
+    # ignore the field remain compatible.
+    "frame_id",
 )
 # A fixed byte region appended after the float64 metadata block stores the
 # original, user-visible stream name (UTF-8, null-padded).  Segment ids are a
@@ -454,6 +460,19 @@ class _MetadataView:
 
     def store_count_release(self, value: int) -> None:
         self[METADATA_INDEX_COUNT] = value
+
+    @property
+    def frame_id(self) -> int:
+        """Return the user publication token (0 on legacy v2 metadata)."""
+        if self._v3 is None:
+            return 0
+        return int(self._v3["frame_id"])
+
+    @frame_id.setter
+    def frame_id(self, value: int) -> None:
+        if self._v3 is None:
+            return
+        self._v3["frame_id"] = np.uint64(int(value) & 0xFFFFFFFFFFFFFFFF)
 
     def __getitem__(self, index: int):
         if self._v2 is not None:
@@ -979,8 +998,6 @@ def _decode_metadata_header(
         )
         if flags & ~known_flags:
             raise ValueError(f"unsupported metadata flags: 0x{flags:x}")
-        if any(bytes(metadata._v3["reserved"])):
-            raise ValueError("reserved metadata bytes must be zero")
         instance_id = metadata.instance_id()
         if flags & METADATA_FLAG_INSTANCE_ID:
             if instance_id is None or instance_id == b"\x00" * 16:
@@ -1524,6 +1541,10 @@ class SharedMemory:
         )
         self._gpu_tensor = gpu_tensor
         self._torch_dtype = torch_dtype
+        # Token to stamp onto the next completed write, consumed by
+        # _finish_write inside the write-sequence bracket so a reader that
+        # observes a stable sequence also observes the matching frame_id.
+        self._pending_frame_id: int | None = None
         self._pinned_staging = None
         self._last_seen_count = int(self._metadata[METADATA_INDEX_COUNT])
         self._last_missed_writes = 0
@@ -1597,6 +1618,20 @@ class SharedMemory:
         """Return the internal write sequence counter for the stream."""
         self._ensure_open("read write_sequence from")
         return self._metadata.load_sequence_acquire()
+
+    @property
+    def frame_id(self) -> int:
+        """Return the user publication token of the most recent write.
+
+        A writer sets this by passing ``frame_id=`` to :meth:`write`,
+        :meth:`write_locked`, or :meth:`write_view`; it is published atomically
+        with the write sequence. It defaults to ``0`` and is ``0`` on legacy v2
+        streams. For a torn-free value paired with its payload, read it inside
+        the same lock scope that snapshots the data (or verify the sequence did
+        not change), exactly like a lock-free payload read.
+        """
+        self._ensure_open("read frame_id from")
+        return int(self._metadata.frame_id)
 
     @property
     def creator_pid(self) -> int:
@@ -1767,6 +1802,11 @@ class SharedMemory:
         count = int(self._metadata[METADATA_INDEX_COUNT]) + 1
         sequence = self._metadata.load_sequence_acquire() + 1
         self._metadata[METADATA_INDEX_WRITE_TIME] = time.time()
+        # Stamp the token before the releasing sequence store so it is covered
+        # by the same publication bracket readers verify.
+        if self._pending_frame_id is not None:
+            self._metadata.frame_id = self._pending_frame_id
+            self._pending_frame_id = None
         self._metadata.store_count_release(count)
         self._metadata.store_sequence_release(sequence)
         if self._notify:
@@ -1787,6 +1827,7 @@ class SharedMemory:
 
     def _abort_write(self) -> None:
         """Publish an invalid generation without claiming partial data."""
+        self._pending_frame_id = None
         sequence = self._metadata.load_sequence_acquire()
         if sequence >= 0:
             self._metadata.store_sequence_release(-max(sequence, 1))
@@ -2354,12 +2395,16 @@ class SharedMemory:
             )
         return self._pinned_staging
 
-    def write(self, value: Any) -> None:
+    def write(self, value: Any, *, frame_id: int | None = None) -> None:
         """Write a full payload into the stream.
 
         ``value`` must match the configured shape. CPU-backed streams accept
         values understood by :func:`numpy.asarray`; GPU-backed streams also
         accept CUDA tensors on the configured device.
+
+        ``frame_id`` optionally stamps a user publication token onto this
+        write, published atomically with the write sequence. It is left
+        unchanged when omitted. See :attr:`frame_id`.
         """
         self._ensure_open("write to")
         self._ensure_writable("write to")
@@ -2387,6 +2432,7 @@ class SharedMemory:
                 raise ValueError(message)
 
         with self.locked():
+            self._pending_frame_id = frame_id
             self._mark_write_started()
             try:
                 if tensor is not None:
@@ -2667,7 +2713,7 @@ class SharedMemory:
             timeout=remaining,
         )
 
-    def write_locked(self, value: Any) -> None:
+    def write_locked(self, value: Any, *, frame_id: int | None = None) -> None:
         """Write a payload without acquiring the lock.
 
         Identical to :meth:`write` but skips the internal ``with
@@ -2675,6 +2721,8 @@ class SharedMemory:
         :meth:`locked` or :meth:`acquire`.  This is the intended public
         replacement for the private ``_mark_write_started`` / ``_finish_write``
         pattern used in high-performance consumers such as shmpipeline.
+
+        ``frame_id`` optionally stamps a publication token; see :meth:`write`.
         """
         self._ensure_open("write to")
         self._ensure_writable("write to")
@@ -2682,6 +2730,7 @@ class SharedMemory:
             raise RuntimeError(
                 "write_locked() requires an active 'with shm.locked()' block"
             )
+        self._pending_frame_id = frame_id
         if self._gpu_tensor is not None:
             tensor = _gpu_write_source(value, self._torch_dtype)
             if tuple(tensor.shape) != self.shape:
@@ -2721,7 +2770,9 @@ class SharedMemory:
                 self._finish_write()
 
     @contextmanager
-    def write_view(self, *, timeout: float | None = None):
+    def write_view(
+        self, *, timeout: float | None = None, frame_id: int | None = None
+    ):
         """Yield a live writable payload view and publish it on success.
 
         The stream lock is held for the complete lifetime of the context.  A
@@ -2731,21 +2782,25 @@ class SharedMemory:
         generation so readers receive :class:`InconsistentStreamError` rather
         than a torn value.  GPU CPU mirrors and CUDA stream synchronization are
         handled here rather than by consumers.
+
+        ``frame_id`` optionally stamps a publication token; see :meth:`write`.
         """
         self._ensure_open("write to")
         self._ensure_writable("write to")
         with self.locked(timeout=timeout):
-            with self.write_view_locked() as view:
+            with self.write_view_locked(frame_id=frame_id) as view:
                 yield view
 
     @contextmanager
-    def write_view_locked(self):
+    def write_view_locked(self, *, frame_id: int | None = None):
         """Yield a writable view while the caller-owned lock is held.
 
         This is the zero-copy publication primitive for callers that already
         acquire several stream locks in a deterministic order.  It never
         acquires or releases the process-shared lock itself; use
         :meth:`write_view` for a standalone write.
+
+        ``frame_id`` optionally stamps a publication token; see :meth:`write`.
         """
         self._ensure_open("write to")
         self._ensure_writable("write to")
@@ -2765,6 +2820,7 @@ class SharedMemory:
                 f"pyshmem.open({self.name!r}, gpu_device='cuda:N')"
             )
 
+        self._pending_frame_id = frame_id
         self._mark_write_started()
         view = (
             self._gpu_tensor if self._gpu_tensor is not None else self._array

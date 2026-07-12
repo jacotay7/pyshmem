@@ -3,6 +3,20 @@
 All notable user-facing changes are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## 1.2.0 - 2026-07-11
+
+### Added
+
+- Added a user `frame_id` publication token: `write()`, `write_locked()`,
+  `write_view()`, and `write_view_locked()` accept `frame_id=`, and the new
+  `SharedMemory.frame_id` property reads it back. The uint64 token is stamped
+  atomically with the write sequence so a reader that observes a stable
+  sequence sees the matching token, letting consumers establish cross-stream
+  frame identity (e.g. a synchronized multi-camera fan-in). It reuses the
+  previously reserved 8-byte slot in the v3 metadata header, is excluded from
+  the header CRC, defaults to 0, and reads 0 on legacy v2 streams, so the
+  on-disk format stays backward compatible.
+
 ## 1.1.1 - 2026-07-11
 
 ### Integration and performance
