@@ -34,6 +34,7 @@ import threading
 import time
 import weakref
 import zlib
+from dataclasses import dataclass
 from multiprocessing import resource_tracker, shared_memory
 from typing import Any, Sequence
 
@@ -73,6 +74,29 @@ else:
     TORCH_DTYPE_MAP = {}
 
 GPU_SUPPORTED_DTYPES: frozenset = frozenset(TORCH_DTYPE_MAP)
+
+
+@dataclass(frozen=True)
+class Publication:
+    """A payload snapshot and the metadata published with it.
+
+    ``payload`` is an independent NumPy array or CUDA tensor when returned by
+    the safe read methods.  The wrapper is immutable; the payload itself keeps
+    the normal NumPy/PyTorch mutability semantics.  ``missed_publications`` is
+    relative to this handle's preceding successful read, just like
+    :attr:`SharedMemory.missed_writes`.
+
+    ``read_publication(..., safe=False)`` is the sole exception: it returns a
+    borrowed backing view while the caller owns ``SharedMemory.locked()``.
+    That view must not outlive the lock scope.
+    """
+
+    payload: Any
+    count: int
+    frame_id: int
+    write_time: float
+    missed_publications: int
+
 
 METADATA_VERSION = 3
 LEGACY_METADATA_VERSION = 2
@@ -1607,6 +1631,25 @@ class SharedMemory:
         self._total_missed_writes += missed
         self._last_seen_count = int(count)
 
+    def _publication(
+        self,
+        payload: Any,
+        *,
+        count: int,
+        frame_id: int,
+        write_time: float,
+    ) -> Publication:
+        """Record a read and package metadata sampled in its seqlock scope."""
+        missed = max(0, int(count) - self._last_seen_count - 1)
+        self._record_read(count)
+        return Publication(
+            payload=payload,
+            count=int(count),
+            frame_id=int(frame_id),
+            write_time=float(write_time),
+            missed_publications=missed,
+        )
+
     @property
     def write_time(self) -> float:
         """Return the UNIX timestamp of the most recent completed write."""
@@ -1923,6 +1966,48 @@ class SharedMemory:
                 self._record_read(end_count)
                 return result
 
+    def _read_publication_consistent_cpu(
+        self, poll_interval: float, out=None, timeout: float | None = None
+    ) -> Publication:
+        """Return a CPU payload and its metadata from one verified sequence."""
+        deadline = (
+            None if timeout is None else time.monotonic() + float(timeout)
+        )
+        while True:
+            remaining = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            start_sequence = self._wait_for_stable_writer(
+                poll_interval, timeout=remaining
+            )
+            if out is not None:
+                np.copyto(out, self._array)
+                payload = out
+            else:
+                payload = np.copy(self._array)
+            # These fields are read before the closing sequence sample.  If a
+            # writer races any part of this block, the sequence retry below
+            # discards the whole candidate rather than mixing generations.
+            frame_id = self._metadata.frame_id
+            write_time = float(self._metadata[METADATA_INDEX_WRITE_TIME])
+            remaining = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            end_sequence, end_count = self._sample_publication_state(
+                timeout=remaining, poll_interval=poll_interval
+            )
+            if start_sequence == end_sequence:
+                return self._publication(
+                    payload,
+                    count=end_count,
+                    frame_id=frame_id,
+                    write_time=write_time,
+                )
+
     def _read_consistent_gpu(
         self, poll_interval: float, timeout: float | None = None
     ):
@@ -1951,6 +2036,42 @@ class SharedMemory:
             if start_sequence == end_sequence:
                 self._record_read(end_count)
                 return result
+
+    def _read_publication_consistent_gpu(
+        self, poll_interval: float, timeout: float | None = None
+    ) -> Publication:
+        """Return a CUDA payload and metadata from one verified sequence."""
+        deadline = (
+            None if timeout is None else time.monotonic() + float(timeout)
+        )
+        while True:
+            remaining = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            start_sequence = self._wait_for_stable_writer(
+                poll_interval, timeout=remaining
+            )
+            payload = self._gpu_tensor.clone()
+            _synchronize_cuda_operation(self.gpu_device)
+            frame_id = self._metadata.frame_id
+            write_time = float(self._metadata[METADATA_INDEX_WRITE_TIME])
+            remaining = (
+                None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            end_sequence, end_count = self._sample_publication_state(
+                timeout=remaining, poll_interval=poll_interval
+            )
+            if start_sequence == end_sequence:
+                return self._publication(
+                    payload,
+                    count=end_count,
+                    frame_id=frame_id,
+                    write_time=write_time,
+                )
 
     def acquire(
         self,
@@ -2510,6 +2631,77 @@ class SharedMemory:
             poll_interval, out=out, timeout=timeout
         )
 
+    def read_publication(
+        self,
+        *,
+        safe: bool = True,
+        poll_interval: float = 1e-6,
+        out=None,
+        timeout: float | None = None,
+    ) -> Publication:
+        """Read the current payload and its publication metadata atomically.
+
+        The returned :class:`Publication` contains a matching payload,
+        completed ``count``, user ``frame_id``, and ``write_time`` from one
+        seqlock-verified publication.  It is the metadata-safe counterpart to
+        calling :meth:`read` and then separate metadata properties.
+
+        The safe default returns an owned CPU array or CUDA tensor snapshot.
+        As with :meth:`read`, ``out`` is supported only for safe CPU reads.
+        With ``safe=False`` the caller must hold :meth:`locked`; the returned
+        payload is a borrowed backing view and is valid only within that lock
+        scope.
+        """
+        self._ensure_open("read a publication from")
+        if not safe:
+            self._ensure_writable("take an unsafe publication view from")
+        if out is not None and (self._gpu_tensor is not None or not safe):
+            raise ValueError(
+                "out is supported only for safe CPU publication reads; pass "
+                "a NumPy destination buffer to a CPU-backed handle"
+            )
+        if not safe:
+            if not self._lock_owned_by_current_thread():
+                raise RuntimeError(
+                    "safe=False requires an active 'with shm.locked()' block"
+                )
+            count = self.count
+            payload = (
+                self._gpu_tensor
+                if self._gpu_tensor is not None
+                else self._array
+            )
+            if (
+                self.gpu_enabled
+                and self._gpu_tensor is None
+                and not self.cpu_mirror
+            ):
+                raise RuntimeError(
+                    f"GPU stream {self.name!r} is not attached on this handle "
+                    "and has no CPU mirror; open it from a process with "
+                    "access to its CUDA device"
+                )
+            return self._publication(
+                payload,
+                count=count,
+                frame_id=self._metadata.frame_id,
+                write_time=float(self._metadata[METADATA_INDEX_WRITE_TIME]),
+            )
+
+        if self._gpu_tensor is not None:
+            return self._read_publication_consistent_gpu(
+                poll_interval, timeout=timeout
+            )
+        if self.gpu_enabled and not self.cpu_mirror:
+            raise RuntimeError(
+                "GPU shared memory was created without cpu_mirror=True; "
+                "reopen it with "
+                f"pyshmem.open({self.name!r}, gpu_device='cuda:N')"
+            )
+        return self._read_publication_consistent_cpu(
+            poll_interval, out=out, timeout=timeout
+        )
+
     def read_new(
         self,
         *,
@@ -2605,6 +2797,38 @@ class SharedMemory:
             else max(0.0, float(timeout) - (time.monotonic() - start))
         )
         return self.read(safe=safe, out=out, timeout=remaining)
+
+    def read_new_publication(
+        self,
+        *,
+        timeout: float | None = None,
+        safe: bool = True,
+        poll_interval: float = 1e-5,
+        out=None,
+    ) -> Publication:
+        """Wait for a new write, then return its atomic publication snapshot.
+
+        This has the same edge-triggered, capacity-one semantics as
+        :meth:`read_new`; intermediate publications may be skipped and are
+        reported in ``Publication.missed_publications``.
+        """
+        self._ensure_open("read a publication from")
+        baseline = self.count
+        start = time.monotonic()
+        self.wait_for_count(
+            after=baseline, timeout=timeout, poll_interval=poll_interval
+        )
+        remaining = (
+            None
+            if timeout is None
+            else max(0.0, float(timeout) - (time.monotonic() - start))
+        )
+        return self.read_publication(
+            safe=safe,
+            poll_interval=poll_interval,
+            out=out,
+            timeout=remaining,
+        )
 
     def wait_for_count(
         self,
@@ -2707,6 +2931,43 @@ class SharedMemory:
             else max(0.0, float(timeout) - (time.monotonic() - start))
         )
         return self.read(
+            safe=safe,
+            poll_interval=poll_interval,
+            out=out,
+            timeout=remaining,
+        )
+
+    def read_after_publication(
+        self,
+        after: int,
+        *,
+        timeout: float | None = None,
+        safe: bool = True,
+        poll_interval: float = 1e-5,
+        out=None,
+    ) -> Publication:
+        """Read a publication after ``after`` with matching metadata.
+
+        This is the metadata-safe counterpart to :meth:`read_after`; it keeps
+        that method's level-triggered semantics for lock-step exchanges.
+        """
+        self._ensure_open("read a publication from")
+        try:
+            baseline = int(after)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("after must be an integer") from exc
+        if baseline < 0:
+            raise ValueError("after must be non-negative")
+        start = time.monotonic()
+        self.wait_for_count(
+            after=baseline, timeout=timeout, poll_interval=poll_interval
+        )
+        remaining = (
+            None
+            if timeout is None
+            else max(0.0, float(timeout) - (time.monotonic() - start))
+        )
+        return self.read_publication(
             safe=safe,
             poll_interval=poll_interval,
             out=out,

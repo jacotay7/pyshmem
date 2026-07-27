@@ -3,6 +3,16 @@
 All notable user-facing changes are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## 1.3.0 - 2026-07-26
+
+### Added
+
+- Added immutable `Publication` snapshots and the `read_publication()`,
+  `read_new_publication()`, and `read_after_publication()` APIs.  Each returns
+  a payload with its matching completed count, `frame_id`, write time, and
+  missed-publication count from one seqlock-verified generation, so consumers
+  no longer have to combine a payload with separately sampled metadata.
+
 ## 1.2.0 - 2026-07-11
 
 ### Added

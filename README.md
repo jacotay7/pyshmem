@@ -31,7 +31,7 @@ import pyshmem
 
 writer = pyshmem.create("frames", shape=(480, 640), dtype=np.float32)
 with writer.write_view() as frame:
-    frame[...] = 1.0                 # zero-copy, exception-safe publish
+    frame[...] = 1.0  # zero-copy, exception-safe publish
 ```
 
 Attach and read from another:
@@ -40,10 +40,14 @@ Attach and read from another:
 import pyshmem
 
 reader = pyshmem.open("frames")
-frame = reader.read()                    # latest consistent snapshot
-next_frame = reader.read_new(timeout=1) # wait for the next publication
+frame = reader.read()  # latest consistent snapshot
+next_frame = reader.read_new(timeout=1)  # wait for the next publication
 next_frame = reader.read_after(reader.last_read_count, timeout=1)
 print(reader.missed_writes)
+
+# Keep a payload and its generation metadata inseparable when it matters.
+publication = reader.read_publication()
+print(publication.frame_id, publication.count, publication.payload)
 
 reader.close()
 ```

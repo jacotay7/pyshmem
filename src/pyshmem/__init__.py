@@ -5,6 +5,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pyshmem._shared import (
     GPU_SUPPORTED_DTYPES,
     InconsistentStreamError,
+    Publication,
     StaleStreamError,
     SharedMemory,
     create,
@@ -27,6 +28,7 @@ except PackageNotFoundError:  # source tree imported without installation
 __all__ = [
     "GPU_SUPPORTED_DTYPES",
     "InconsistentStreamError",
+    "Publication",
     "StaleStreamError",
     "SharedMemory",
     "create",

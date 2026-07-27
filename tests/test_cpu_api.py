@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import FrozenInstanceError
 from importlib.metadata import version
 import math
 import multiprocessing as mp
@@ -931,6 +932,89 @@ def test_frame_id_defaults_zero_and_round_trips_across_handles(shm_name):
             consumer.close()
     finally:
         owner.close()
+
+
+def test_publication_snapshot_keeps_payload_and_metadata_together(shm_name):
+    owner = pyshmem.create(shm_name, shape=(3,), dtype=np.int64)
+    try:
+        owner.write(np.full(3, 1, dtype=np.int64), frame_id=2**63 + 3)
+        first = owner.read_publication()
+        assert isinstance(first, pyshmem.Publication)
+        np.testing.assert_array_equal(first.payload, np.full(3, 1))
+        assert first.count == 1
+        assert first.frame_id == 2**63 + 3
+        assert first.write_time > 0
+        assert first.missed_publications == 0
+        with pytest.raises(FrozenInstanceError):
+            first.count = 2
+
+        owner.write(np.full(3, 2, dtype=np.int64), frame_id=4)
+        owner.write(np.full(3, 3, dtype=np.int64), frame_id=5)
+        latest = owner.read_publication()
+        np.testing.assert_array_equal(latest.payload, np.full(3, 3))
+        assert latest.count == 3
+        assert latest.frame_id == 5
+        assert latest.missed_publications == 1
+        assert owner.missed_writes == 1
+    finally:
+        owner.unlink()
+
+
+def test_publication_read_variants_and_timeout(shm_name):
+    owner = pyshmem.create(shm_name, shape=(1,), dtype=np.int64)
+    try:
+        with pytest.raises(TimeoutError):
+            owner.read_new_publication(timeout=0.001)
+
+        def writer() -> None:
+            time.sleep(0.01)
+            owner.write(np.array([8], dtype=np.int64), frame_id=12)
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        current = owner.read_new_publication(timeout=1.0)
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+        assert current.count == 1
+        assert current.frame_id == 12
+        np.testing.assert_array_equal(current.payload, [8])
+
+        owner.write(np.array([9], dtype=np.int64), frame_id=13)
+        after = owner.read_after_publication(1, timeout=1.0)
+        assert after.count == 2
+        assert after.frame_id == 13
+        np.testing.assert_array_equal(after.payload, [9])
+    finally:
+        owner.unlink()
+
+
+def test_publication_snapshot_does_not_mix_a_racing_writer(shm_name):
+    owner = pyshmem.create(shm_name, shape=(128,), dtype=np.uint64)
+    started = threading.Event()
+    finished = threading.Event()
+
+    def writer() -> None:
+        started.set()
+        for token in range(1, 401):
+            owner.write(np.full(128, token, dtype=np.uint64), frame_id=token)
+        finished.set()
+
+    thread = threading.Thread(target=writer)
+    try:
+        thread.start()
+        assert started.wait(timeout=1.0)
+        while not finished.is_set():
+            publication = owner.read_publication(timeout=1.0)
+            assert publication.frame_id == int(publication.payload[0])
+            assert np.all(publication.payload == publication.frame_id)
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+        publication = owner.read_publication()
+        assert publication.frame_id == 400
+        assert np.all(publication.payload == 400)
+    finally:
+        thread.join(timeout=1.0)
+        owner.unlink()
 
 
 def test_frame_id_writes_do_not_disturb_header_crc(shm_name):

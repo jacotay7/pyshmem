@@ -177,6 +177,33 @@ array, and verifies the sequence did not change mid-copy.
 CPU streams return a :class:`numpy.ndarray`; GPU streams return a
 :class:`torch.Tensor` on the configured device.
 
+Payloads with publication metadata
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Do not read a payload and then separately inspect ``count``, ``frame_id``, or
+``write_time`` when the identity of that exact payload matters: a writer may
+publish another generation in between.  Use
+:meth:`~pyshmem.SharedMemory.read_publication` instead.  It snapshots the
+payload and its completed publication metadata under one verified sequence:
+
+.. code-block:: python
+
+   publication = reader.read_publication()
+   frame = publication.payload
+   print(publication.count, publication.frame_id, publication.write_time)
+
+   # Level-triggered lock-step and edge-triggered latest-value variants.
+   next_publication = reader.read_after_publication(
+       publication.count, timeout=1.0
+   )
+   latest_new_publication = reader.read_new_publication(timeout=1.0)
+
+``Publication.missed_publications`` records values skipped since this handle's
+previous successful read.  Safe publication reads own their NumPy array or CUDA
+tensor just like :meth:`~pyshmem.SharedMemory.read`; the optional
+``safe=False`` form returns a borrowed payload view that is valid only while
+the caller owns ``with reader.locked():``.
+
 Zero-allocation reads
 ~~~~~~~~~~~~~~~~~~~~~
 
