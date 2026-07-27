@@ -3,7 +3,7 @@
 All notable user-facing changes are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
-## 1.3.0 - 2026-07-26
+## 1.3.1 - 2026-07-26
 
 ### Added
 
@@ -12,6 +12,11 @@ All notable user-facing changes are documented here. The project follows
   a payload with its matching completed count, `frame_id`, write time, and
   missed-publication count from one seqlock-verified generation, so consumers
   no longer have to combine a payload with separately sampled metadata.
+
+### Changed
+
+- Relicensed pyshmem under MIT after a first-party authorship and provenance
+  audit. Third-party dependencies retain their own licenses.
 
 ## 1.2.0 - 2026-07-11
 

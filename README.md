@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/pyshmem)](https://pypi.org/project/pyshmem/)
 [![CI](https://github.com/jacotay7/pyshmem/actions/workflows/ci.yml/badge.svg)](https://github.com/jacotay7/pyshmem/actions/workflows/ci.yml)
 [![Documentation](https://readthedocs.org/projects/pyshmem/badge/?version=latest)](https://pyshmem.readthedocs.io/)
-[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 pyshmem is a Python library for low-latency, cross-process exchange of fixed
 shape NumPy arrays and CUDA-backed PyTorch tensors. CPU and GPU streams share
@@ -111,8 +111,7 @@ methodology, CPU/GPU measurements, and limitations.
 
 ## License and contact
 
-pyshmem is licensed under [GPL-3.0-only](LICENSE). Applications that distribute
-pyshmem or derivative work should evaluate the GPL's obligations.
+pyshmem is licensed under the [MIT License](LICENSE).
 
 Use [GitHub issues](https://github.com/jacotay7/pyshmem/issues) for bugs and
 feature requests. See [CONTRIBUTING.md](CONTRIBUTING.md) for development,
