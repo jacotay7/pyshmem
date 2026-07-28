@@ -3,6 +3,13 @@
 All notable user-facing changes are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- Corrected stale contributor and developer documentation that still named
+  GPL-3.0-only after the project moved to MIT.
+
 ## 1.3.1 - 2026-07-26
 
 ### Added

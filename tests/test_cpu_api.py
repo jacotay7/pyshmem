@@ -853,6 +853,10 @@ def test_open_accepts_legacy_v2_metadata(shm_name):
         try:
             assert opened._metadata.layout_version == 2
             np.testing.assert_array_equal(opened.read(), payload)
+            publication = opened.read_publication()
+            np.testing.assert_array_equal(publication.payload, payload)
+            assert publication.frame_id == 0
+            assert publication.count == 0
         finally:
             opened.close()
     finally:
@@ -925,7 +929,7 @@ def test_frame_id_defaults_zero_and_round_trips_across_handles(shm_name):
                 )
             assert consumer.frame_id == 99
             # Full uint64 range round-trips.
-            token = 2**63 + 5
+            token = 2**64 - 1
             owner.write(np.zeros(4, dtype=np.float32), frame_id=token)
             assert consumer.frame_id == token
         finally:
@@ -1747,6 +1751,8 @@ def test_write_view_aborts_publication_on_exception(shm_name):
 
     with pytest.raises(pyshmem.InconsistentStreamError):
         reader.read(timeout=0.1)
+    with pytest.raises(pyshmem.InconsistentStreamError):
+        reader.read_publication(timeout=0.1)
 
     reader.close()
     writer.unlink()

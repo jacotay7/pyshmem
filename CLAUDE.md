@@ -56,41 +56,54 @@ import pyshmem
 
 # Create
 shm = pyshmem.create("my_stream", shape=(100,), dtype="float32")
-shm = pyshmem.create("my_gpu_stream", shape=(100,), dtype="float32",
-                      gpu_device="cuda:0", cpu_mirror=False)
+shm = pyshmem.create(
+    "my_gpu_stream",
+    shape=(100,),
+    dtype="float32",
+    gpu_device="cuda:0",
+    cpu_mirror=False,
+)
 # opt-in kernel wakeups: writers wake parked read_new consumers via a futex
 shm = pyshmem.create("frames", shape=(480, 640), notify=True)
 # auto-unlink on context exit
 shm = pyshmem.create("tmp", shape=(10,), auto_unlink=True)
-with pyshmem.stream("tmp2", shape=(10,)) as shm:   # always auto-unlinks
+with pyshmem.stream("tmp2", shape=(10,)) as shm:  # always auto-unlinks
     ...
 
 # Attach — open() reconstructs the stream as created.  For a GPU stream it
 # auto-attaches to the CUDA device recorded in metadata; no need to pass
 # gpu_device. Passing gpu_device explicitly still works (and must match).
 shm = pyshmem.open("my_stream")
-shm = pyshmem.open("my_gpu_stream")                 # auto-attaches to its cuda:N
-shm = pyshmem.open("my_gpu_stream", gpu_device="cuda:0")  # explicit (must match)
-shm = pyshmem.open("my_gpu_stream", gpu_device=False)    # CPU-mirror only (no GPU attach; requires cpu_mirror=True)
-shm = pyshmem.open("my_stream", readonly=True)           # consumer handle: mutating ops raise PermissionError
+shm = pyshmem.open("my_gpu_stream")  # auto-attaches to its cuda:N
+shm = pyshmem.open(
+    "my_gpu_stream", gpu_device="cuda:0"
+)  # explicit (must match)
+shm = pyshmem.open(
+    "my_gpu_stream", gpu_device=False
+)  # CPU-mirror only (no GPU attach; requires cpu_mirror=True)
+shm = pyshmem.open(
+    "my_stream", readonly=True
+)  # consumer handle: mutating ops raise PermissionError
 
 # Discover
-pyshmem.list_streams()    # returns sorted list of user-visible stream names
-pyshmem.gpu_available()   # True iff torch is importable and CUDA is available
+pyshmem.list_streams()  # returns sorted list of user-visible stream names
+pyshmem.gpu_available()  # True iff torch is importable and CUDA is available
 
 # Use
-shm.write(array)          # CPU: numpy array; GPU: numpy or CUDA tensor
-data = shm.read()         # returns np.ndarray (CPU) or torch.Tensor (GPU)
+shm.write(array)  # CPU: numpy array; GPU: numpy or CUDA tensor
+data = shm.read()  # returns np.ndarray (CPU) or torch.Tensor (GPU)
 data = shm.read(out=buf)  # zero-alloc: writes into pre-allocated buffer
-data = shm.read_new(timeout=1.0)         # blocks until a new write arrives
+data = shm.read_new(timeout=1.0)  # blocks until a new write arrives
 data = await shm.read_new_async(timeout=1.0)  # asyncio-safe variant
 count = shm.wait_for_count(after=last_count, timeout=1.0)  # level-triggered
 data = shm.read_after(last_count, timeout=1.0)
 
 # Locking (explicit)
 shm.acquire(timeout=0.5)
-shm.read(safe=False)           # zero-copy view — only valid inside lock
-shm.write_locked(value)        # write without re-acquiring lock (shmpipeline fast path)
+shm.read(safe=False)  # zero-copy view — only valid inside lock
+shm.write_locked(
+    value
+)  # write without re-acquiring lock (shmpipeline fast path)
 with shm.write_view() as output:  # zero-copy, exception-safe publication
     output[...] = value
 shm.release()
@@ -103,27 +116,27 @@ with pyshmem.locked_many([input_stream, output_stream]):
     ...
 
 # Metadata
-pyshmem.stat("my_stream")   # metadata-only attach/reuse inspection
-shm.describe()             # human-readable summary string
-cfg = shm.to_config()      # dict: name/shape/dtype/gpu_device/cpu_mirror
+pyshmem.stat("my_stream")  # metadata-only attach/reuse inspection
+shm.describe()  # human-readable summary string
+cfg = shm.to_config()  # dict: name/shape/dtype/gpu_device/cpu_mirror
 shm2 = pyshmem.SharedMemory.create_from_config(cfg)
 
 # Liveness / staleness (consumer-side, no heartbeat thread)
-shm.age                    # seconds since last completed write (inf if never)
-shm.is_stale(max_age)      # True if latest write older than max_age seconds
-shm.producer_alive()       # best-effort single-host PID liveness of creator
-shm.creator_pid            # PID that created the stream
+shm.age  # seconds since last completed write (inf if never)
+shm.is_stale(max_age)  # True if latest write older than max_age seconds
+shm.producer_alive()  # best-effort single-host PID liveness of creator
+shm.creator_pid  # PID that created the stream
 
 # Framework interop (DLPack) — consistent snapshot, not a live view
-np.from_dlpack(shm)        # CPU -> numpy; torch.from_dlpack(shm) GPU -> tensor
-shm.__dlpack_device__()    # (kDLCPU,0) for CPU, attached CUDA device for GPU
+np.from_dlpack(shm)  # CPU -> numpy; torch.from_dlpack(shm) GPU -> tensor
+shm.__dlpack_device__()  # (kDLCPU,0) for CPU, attached CUDA device for GPU
 
 # Lifecycle
-shm.close()               # detach this handle; stream persists
-shm.unlink()              # destroy the stream entirely
+shm.close()  # detach this handle; stream persists
+shm.unlink()  # destroy the stream entirely
 pyshmem.unlink("my_stream")
-pyshmem.unlink_quiet("x") # unlink; no error if the stream is already gone
-pyshmem.purge()           # remove all validated pyshmem segments (see CLI)
+pyshmem.unlink_quiet("x")  # unlink; no error if the stream is already gone
+pyshmem.purge()  # remove all validated pyshmem segments (see CLI)
 ```
 
 ## Constants
@@ -237,7 +250,7 @@ python -m pytest tests/test_cpu_api.py -q   # must be green before any merge
 ## Package Info
 
 - Package name on PyPI: `pyshmem` (v1.2.0)
-- License: GPL-3.0-only
+- License: MIT
 - Required deps: `numpy>=1.26,<3`, `portalocker>=3.1`
 - Optional deps: `torch>=2.2` (GPU support)
 - Python: 3.9–3.13

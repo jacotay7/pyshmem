@@ -31,4 +31,4 @@ scope. Changes to the persistent metadata format require backward-compatible
 read support, validation tests, and an update to `docs/format.rst`.
 
 By contributing, you agree that your contribution is licensed under the
-repository's GPL-3.0-only license.
+repository's MIT License.

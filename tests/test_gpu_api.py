@@ -52,6 +52,49 @@ def test_gpu_frame_id_round_trips(shm_name):
 
 
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_publication_snapshot_owns_matching_payload_and_metadata(shm_name):
+    shm = pyshmem.create(
+        shm_name,
+        shape=(4,),
+        dtype="float32",
+        gpu_device="cuda:0",
+        cpu_mirror=False,
+    )
+    try:
+        first_token = 2**64 - 1
+        shm.write(
+            torch.full((4,), 3.0, device="cuda:0"),
+            frame_id=first_token,
+        )
+        publication = shm.read_publication()
+        assert isinstance(publication, pyshmem.Publication)
+        assert publication.payload.device.type == "cuda"
+        assert publication.frame_id == first_token
+        assert publication.count == 1
+        assert publication.write_time > 0.0
+        assert publication.missed_publications == 0
+
+        # A safe publication owns its tensor snapshot; a subsequent write
+        # cannot change the payload or metadata already returned.
+        shm.write(torch.full((4,), 8.0, device="cuda:0"), frame_id=2)
+        torch.testing.assert_close(
+            publication.payload,
+            torch.full((4,), 3.0, device="cuda:0"),
+        )
+        assert publication.frame_id == first_token
+
+        latest = shm.read_after_publication(1, timeout=1.0)
+        torch.testing.assert_close(
+            latest.payload,
+            torch.full((4,), 8.0, device="cuda:0"),
+        )
+        assert latest.frame_id == 2
+        assert latest.count == 2
+    finally:
+        shm.unlink()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
 @pytest.mark.parametrize(
     "dtype,values",
     [
