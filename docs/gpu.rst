@@ -117,6 +117,11 @@ safe for another process to observe. A future fully asynchronous API requires
 an interprocess event/publication protocol; simply returning before updating
 metadata would expose incomplete payloads.
 
+Each handle reuses one completion event per process, thread, and active CUDA
+stream after the prior wait completes. Concurrent threads and distinct streams
+therefore never record the same event, while steady synchronous traffic avoids
+per-operation event construction. Closing the handle releases its event cache.
+
 Compatibility mode
 ^^^^^^^^^^^^^^^^^^
 

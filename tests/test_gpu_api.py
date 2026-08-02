@@ -408,6 +408,67 @@ def test_gpu_operations_do_not_synchronize_whole_device(shm_name, monkeypatch):
 
 
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_completion_event_is_reused_per_thread_and_stream(shm_name):
+    shm = pyshmem.create(
+        shm_name, shape=(4,), dtype=np.float32, gpu_device="cuda:0"
+    )
+    try:
+        payload = torch.arange(4, device="cuda:0", dtype=torch.float32)
+        shm.write(payload)
+        assert len(shm._cuda_sync_events) == 1
+        first_event = next(iter(shm._cuda_sync_events.values()))
+
+        shm.write(payload + 1.0)
+        assert len(shm._cuda_sync_events) == 1
+        assert next(iter(shm._cuda_sync_events.values())) is first_event
+
+        alternate = torch.cuda.Stream(device="cuda:0")
+        with torch.cuda.stream(alternate):
+            shm.write(payload + 2.0)
+            shm.write(payload + 3.0)
+        assert len(shm._cuda_sync_events) == 2
+        assert (
+            len({id(event) for event in shm._cuda_sync_events.values()}) == 2
+        )
+    finally:
+        shm.close()
+        assert shm._cuda_sync_events == {}
+        pyshmem.unlink(shm_name)
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
+def test_gpu_completion_events_are_not_shared_by_concurrent_threads(shm_name):
+    shm = pyshmem.create(
+        shm_name, shape=(4,), dtype=np.float32, gpu_device="cuda:0"
+    )
+    barrier = threading.Barrier(2)
+    failures = []
+
+    def write_from_thread(value):
+        try:
+            barrier.wait(timeout=2.0)
+            shm.write(torch.full((4,), value, device="cuda:0"))
+        except BaseException as exc:
+            failures.append(exc)
+
+    threads = [
+        threading.Thread(target=write_from_thread, args=(value,))
+        for value in (1.0, 2.0)
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5.0)
+        assert not failures
+        assert all(not thread.is_alive() for thread in threads)
+        assert len(shm._cuda_sync_events) == 2
+        assert len({key[1] for key in shm._cuda_sync_events}) == 2
+    finally:
+        shm.unlink()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is not available")
 def test_open_auto_attaches_to_stored_gpu_device(shm_name):
     # open() reconstructs the stream as created: it attaches to the CUDA device
     # recorded in metadata without the caller having to pass gpu_device.

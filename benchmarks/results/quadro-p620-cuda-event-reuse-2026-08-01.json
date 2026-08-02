@@ -1,0 +1,80 @@
+{
+  "benchmark": "cuda-completion-event-reuse",
+  "date": "2026-08-01",
+  "gpu": "Quadro P620",
+  "torch": "2.13.0+cu126",
+  "python": "3.13.13",
+  "completion_boundary": {
+    "method": "seven alternating repetitions of 20000 record-and-synchronize operations after 1000 paired warmups",
+    "new_event_ns_per_completion": [
+      7010.6454,
+      7138.8001,
+      6930.56735,
+      7098.5354,
+      7061.4898,
+      7004.645,
+      6997.85545
+    ],
+    "reused_event_ns_per_completion": [
+      5684.60715,
+      5678.56325,
+      5688.65215,
+      5679.246,
+      5702.21595,
+      5715.10725,
+      5744.6716
+    ],
+    "new_event_median_ns": 7010.6454,
+    "reused_event_median_ns": 5688.65215,
+    "speedup": 1.2323912967678996,
+    "latency_reduction_percent": 18.85694076040417
+  },
+  "stream_operation": {
+    "shape": [228, 228],
+    "dtype": "float64",
+    "method": "seven alternating repetitions of 2000 same-process operations; baseline clears the handle event cache before each call",
+    "write_new_event_ns": [
+      82867.726,
+      81527.5275,
+      80372.599,
+      80757.454,
+      81449.309,
+      81854.863,
+      80316.3325
+    ],
+    "write_reused_event_ns": [
+      80992.82,
+      79723.5375,
+      79323.285,
+      83825.513,
+      78326.4945,
+      79779.6655,
+      79453.4775
+    ],
+    "read_new_event_ns": [
+      46726.596,
+      45212.1325,
+      45145.066,
+      45371.662,
+      45926.047,
+      45004.1365,
+      45138.471
+    ],
+    "read_reused_event_ns": [
+      43016.018,
+      42902.546,
+      44289.218,
+      42969.106,
+      42752.458,
+      42714.562,
+      44154.547
+    ],
+    "write_new_event_median_ns": 81449.309,
+    "write_reused_event_median_ns": 79723.5375,
+    "write_latency_reduction_percent": 2.1188289025263374,
+    "read_new_event_median_ns": 45212.1325,
+    "read_reused_event_median_ns": 42969.106,
+    "read_latency_reduction_percent": 4.961116355217266
+  },
+  "correctness": "GPU suite verifies per-stream reuse, distinct events for alternate streams and concurrent threads, recoverable synchronization failure, publication sequencing, close/lifecycle, and spawned CUDA IPC."
+}

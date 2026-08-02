@@ -58,6 +58,17 @@ PyTorch 2.10, RTX 5090):
 These are one-machine observations, not universal performance claims; rerun the
 harness on the intended deployment host.
 
+CUDA completion-event reuse
+---------------------------
+
+``benchmarks/results/quadro-p620-cuda-event-reuse-2026-08-01.json`` records a
+targeted seven-repetition comparison of newly allocated versus per-handle
+reused completion events. On that device the event boundary alone improves
+from 7.011 to 5.689 microseconds (18.86%). Including pyshmem locking, payload
+copy, consistency, and publication for a 228-by-228 float64 stream, synchronous
+writes improve 2.12% and safe reads improve 4.96%. This is an implementation
+comparison on one CUDA/PyTorch pair, not a portable threshold.
+
 Running benchmarks locally
 --------------------------
 

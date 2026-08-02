@@ -1167,10 +1167,23 @@ def _gpu_write_source(value: Any, torch_dtype):
     return torch.as_tensor(value, dtype=torch_dtype)
 
 
-def _synchronize_cuda_operation(device) -> None:
-    """Wait for prior work in the active stream, not the entire device."""
+def _synchronize_cuda_operation(device, event_cache=None) -> None:
+    """Wait for prior work in the active stream, reusing a safe event.
+
+    A CUDA event may be recorded again after its previous synchronization has
+    completed.  Cache keys include process, thread, and stream identity so two
+    concurrent callers never mutate the same event and an inherited post-fork
+    handle never reuses a parent CUDA object.
+    """
     stream = torch.cuda.current_stream(device=device)
-    event = torch.cuda.Event()
+    if event_cache is None:
+        event = torch.cuda.Event()
+    else:
+        key = (os.getpid(), threading.get_ident(), int(stream.cuda_stream))
+        event = event_cache.get(key)
+        if event is None:
+            event = torch.cuda.Event()
+            event_cache[key] = event
     event.record(stream)
     event.synchronize()
 
@@ -1570,6 +1583,7 @@ class SharedMemory:
         # observes a stable sequence also observes the matching frame_id.
         self._pending_frame_id: int | None = None
         self._pinned_staging = None
+        self._cuda_sync_events: dict[tuple[int, int, int], Any] = {}
         self._last_seen_count = int(self._metadata[METADATA_INDEX_COUNT])
         self._last_missed_writes = 0
         self._total_missed_writes = 0
@@ -2024,7 +2038,9 @@ class SharedMemory:
                 poll_interval, timeout=remaining
             )
             result = self._gpu_tensor.clone()
-            _synchronize_cuda_operation(self.gpu_device)
+            _synchronize_cuda_operation(
+                self.gpu_device, self._cuda_sync_events
+            )
             remaining = (
                 None
                 if deadline is None
@@ -2054,7 +2070,9 @@ class SharedMemory:
                 poll_interval, timeout=remaining
             )
             payload = self._gpu_tensor.clone()
-            _synchronize_cuda_operation(self.gpu_device)
+            _synchronize_cuda_operation(
+                self.gpu_device, self._cuda_sync_events
+            )
             frame_id = self._metadata.frame_id
             write_time = float(self._metadata[METADATA_INDEX_WRITE_TIME])
             remaining = (
@@ -2442,6 +2460,7 @@ class SharedMemory:
         if self._gpu_tensor is not None and not self.owner:
             self._gpu_tensor = None
         self._pinned_staging = None
+        self._cuda_sync_events.clear()
         self._closed = True
         if not self._lock_state_released:
             _release_lock_state(self._lock_state)
@@ -2487,7 +2506,9 @@ class SharedMemory:
                 if self.cpu_mirror:
                     self._array.fill(0)
                 if self._gpu_tensor is not None:
-                    _synchronize_cuda_operation(self.gpu_device)
+                    _synchronize_cuda_operation(
+                        self.gpu_device, self._cuda_sync_events
+                    )
             except BaseException:
                 self._abort_write()
                 raise
@@ -2562,7 +2583,9 @@ class SharedMemory:
                     self._gpu_tensor.copy_(tensor)
                     if self.cpu_mirror:
                         np.copyto(self._array, tensor.detach().cpu().numpy())
-                    _synchronize_cuda_operation(self.gpu_device)
+                    _synchronize_cuda_operation(
+                        self.gpu_device, self._cuda_sync_events
+                    )
                 else:
                     np.copyto(self._array, array)
             except BaseException:
@@ -3003,7 +3026,9 @@ class SharedMemory:
                 self._gpu_tensor.copy_(tensor)
                 if self.cpu_mirror:
                     np.copyto(self._array, tensor.detach().cpu().numpy())
-                _synchronize_cuda_operation(self.gpu_device)
+                _synchronize_cuda_operation(
+                    self.gpu_device, self._cuda_sync_events
+                )
             except BaseException:
                 self._abort_write()
                 raise
@@ -3099,7 +3124,9 @@ class SharedMemory:
                             self._array,
                             self._gpu_tensor.detach().cpu().numpy(),
                         )
-                    _synchronize_cuda_operation(self.gpu_device)
+                    _synchronize_cuda_operation(
+                        self.gpu_device, self._cuda_sync_events
+                    )
             except BaseException:
                 self._abort_write()
                 raise

@@ -5,6 +5,12 @@ All notable user-facing changes are documented here. The project follows
 
 ## Unreleased
 
+### Changed
+
+- Reuse synchronous CUDA completion events per handle, process, thread, and
+  active stream instead of allocating one event for every read, write, clear,
+  or write-view publication. Handle close releases the event cache.
+
 ### Fixed
 
 - Corrected stale contributor and developer documentation that still named
