@@ -249,7 +249,7 @@ python -m pytest tests/test_cpu_api.py -q   # must be green before any merge
 
 ## Package Info
 
-- Package name on PyPI: `pyshmem` (v1.2.0)
+- Package name on PyPI: `pyshmem` (v1.3.2)
 - License: MIT
 - Required deps: `numpy>=1.26,<3`, `portalocker>=3.1`
 - Optional deps: `torch>=2.2` (GPU support)
