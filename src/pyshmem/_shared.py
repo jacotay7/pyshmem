@@ -318,7 +318,10 @@ else:  # pragma: no cover - exercised only on non-futex platforms
         pass
 
 
-_THREAD_LOCK_GUARD = threading.Lock()
+# Reentrant: a SharedMemory finalizer (garbage collection can run it inside
+# any allocation, including while this guard is held) calls
+# _release_lock_state on the same thread; a plain Lock would self-deadlock.
+_THREAD_LOCK_GUARD = threading.RLock()
 _THREAD_LOCKS: dict[str, "_SharedLockState"] = {}
 _LOCAL_GPU_TENSORS: dict[str, weakref.ReferenceType[Any]] = {}
 # Per-name locks for serialising GPU handle reconstruction across threads.
@@ -672,10 +675,22 @@ def _lock_state(name: str) -> _SharedLockState:
     path = _lock_path(name)
     with _THREAD_LOCK_GUARD:
         state = _THREAD_LOCKS.get(path)
+        if state is not None:
+            state.reference_count += 1
+            return state
+    # Open the lock file outside the guard: file I/O allocates, and a
+    # finalizer run by garbage collection must be able to take the guard.
+    created = _SharedLockState(path)
+    with _THREAD_LOCK_GUARD:
+        state = _THREAD_LOCKS.get(path)
         if state is None:
-            state = _SharedLockState(path)
+            state = created
             _THREAD_LOCKS[path] = state
+            created = None
         state.reference_count += 1
+    if created is not None:
+        # Another thread registered this path first; drop our duplicate.
+        created.file_handle.close()
     return state
 
 
@@ -709,7 +724,7 @@ def _reset_locks_after_fork() -> None:
     those guards in case they were held at fork time.
     """
     global _THREAD_LOCK_GUARD, _GPU_OPEN_LOCKS_GUARD
-    _THREAD_LOCK_GUARD = threading.Lock()
+    _THREAD_LOCK_GUARD = threading.RLock()
     _GPU_OPEN_LOCKS_GUARD = threading.Lock()
     for state in list(_THREAD_LOCKS.values()):
         # Fresh RLock (an inherited one may look held) and a private open
