@@ -1170,6 +1170,10 @@ def test_producer_alive_true_for_own_stream(shm_name):
         shm.unlink()
 
 
+@pytest.mark.skipif(
+    WINDOWS_SHARED_MEMORY_IS_EPHEMERAL,
+    reason="Windows frees named shared memory when the last handle closes",
+)
 def test_producer_alive_false_after_creator_exits(shm_name):
     result = _run_python_child(
         "import numpy as np, pyshmem\n"
@@ -1187,6 +1191,33 @@ def test_producer_alive_false_after_creator_exits(shm_name):
         np.testing.assert_array_equal(reader.read(), np.ones(1))
     finally:
         reader.unlink()
+
+
+def test_pid_liveness_never_signals_on_windows(monkeypatch):
+    # On Windows os.kill(pid, 0) sends CTRL_C_EVENT to the console process
+    # group, so the liveness probe must use the Win32 API instead.
+    def _forbidden_kill(pid, sig):
+        raise AssertionError("os.kill must not be used on Windows")
+
+    monkeypatch.setattr(pyshmem_shared.os, "name", "nt")
+    monkeypatch.setattr(pyshmem_shared.os, "kill", _forbidden_kill)
+    monkeypatch.setattr(
+        pyshmem_shared, "_windows_pid_is_alive", lambda pid: pid == 1234
+    )
+    assert pyshmem_shared._pid_is_alive(1234) is True
+    assert pyshmem_shared._pid_is_alive(4321) is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 process probe")
+def test_windows_pid_probe_detects_live_and_exited_processes():
+    assert pyshmem_shared._windows_pid_is_alive(os.getpid()) is True
+    child = subprocess.run(
+        [sys.executable, "-c", "import os; print(os.getpid())"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert pyshmem_shared._windows_pid_is_alive(int(child.stdout)) is False
 
 
 def test_dlpack_cpu_snapshot_roundtrip_and_independence(shm_name):
@@ -2519,6 +2550,11 @@ def test_recreated_stream_has_new_instance_id(shm_name):
         replacement.unlink()
 
 
+@pytest.mark.skipif(
+    WINDOWS_SHARED_MEMORY_IS_EPHEMERAL,
+    reason="Windows keeps a name alive while any handle is open, so a "
+    "replacement generation cannot be created under a stale handle",
+)
 def test_stale_handle_cannot_unlink_replacement(shm_name):
     original = pyshmem.create(shm_name, shape=(1,), dtype=np.int64)
     stale = pyshmem.open(shm_name)
