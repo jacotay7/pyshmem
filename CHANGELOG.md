@@ -5,6 +5,15 @@ All notable user-facing changes are documented here. The project follows
 
 ## Unreleased
 
+## 1.3.3 - 2026-09-26
+
+### Fixed
+
+- On Windows, process liveness checks (`producer_alive()`, `stat()`, and the
+  abandoned-writer check that runs when a reader sees a write in progress)
+  used `os.kill(pid, 0)`, which sends Ctrl+C to the whole console process
+  group. They now use `OpenProcess`/`GetExitCodeProcess`.
+
 ## 1.3.2 - 2026-09-26
 
 ### Changed
