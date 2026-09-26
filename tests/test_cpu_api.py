@@ -1170,6 +1170,10 @@ def test_producer_alive_true_for_own_stream(shm_name):
         shm.unlink()
 
 
+@pytest.mark.skipif(
+    WINDOWS_SHARED_MEMORY_IS_EPHEMERAL,
+    reason="Windows frees named shared memory when the last handle closes",
+)
 def test_producer_alive_false_after_creator_exits(shm_name):
     result = _run_python_child(
         "import numpy as np, pyshmem\n"
@@ -2546,6 +2550,11 @@ def test_recreated_stream_has_new_instance_id(shm_name):
         replacement.unlink()
 
 
+@pytest.mark.skipif(
+    WINDOWS_SHARED_MEMORY_IS_EPHEMERAL,
+    reason="Windows keeps a name alive while any handle is open, so a "
+    "replacement generation cannot be created under a stale handle",
+)
 def test_stale_handle_cannot_unlink_replacement(shm_name):
     original = pyshmem.create(shm_name, shape=(1,), dtype=np.int64)
     stale = pyshmem.open(shm_name)
