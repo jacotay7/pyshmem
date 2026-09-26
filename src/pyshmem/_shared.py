@@ -852,6 +852,11 @@ def _safe_remove(path: str) -> None:
         pass
 
 
+_WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_WIN_STILL_ACTIVE = 259
+_WIN_ERROR_ACCESS_DENIED = 5
+
+
 def _collect_cuda_ipc() -> None:
     """Force torch to release this process's freed CUDA IPC ref-count files.
 
@@ -868,9 +873,34 @@ def _collect_cuda_ipc() -> None:
         pass
 
 
+def _windows_pid_is_alive(pid: int) -> bool:
+    """Return whether ``pid`` is a running process, via the Win32 API."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    handle = kernel32.OpenProcess(
+        _WIN_PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid)
+    )
+    if not handle:
+        # Access denied means the process exists but belongs to someone else.
+        return ctypes.get_last_error() == _WIN_ERROR_ACCESS_DENIED
+    try:
+        exit_code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(
+            ctypes.c_void_p(handle), ctypes.byref(exit_code)
+        ):
+            return True  # be conservative: assume alive
+        return exit_code.value == _WIN_STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+
 def _pid_is_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os.name == "nt":
+        # os.kill(pid, 0) is not a probe on Windows: signal 0 is
+        # CTRL_C_EVENT, which interrupts the whole console process group.
+        return _windows_pid_is_alive(pid)
     if os.path.isdir(f"/proc/{pid}"):
         return True
     try:

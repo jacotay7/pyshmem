@@ -1189,6 +1189,33 @@ def test_producer_alive_false_after_creator_exits(shm_name):
         reader.unlink()
 
 
+def test_pid_liveness_never_signals_on_windows(monkeypatch):
+    # On Windows os.kill(pid, 0) sends CTRL_C_EVENT to the console process
+    # group, so the liveness probe must use the Win32 API instead.
+    def _forbidden_kill(pid, sig):
+        raise AssertionError("os.kill must not be used on Windows")
+
+    monkeypatch.setattr(pyshmem_shared.os, "name", "nt")
+    monkeypatch.setattr(pyshmem_shared.os, "kill", _forbidden_kill)
+    monkeypatch.setattr(
+        pyshmem_shared, "_windows_pid_is_alive", lambda pid: pid == 1234
+    )
+    assert pyshmem_shared._pid_is_alive(1234) is True
+    assert pyshmem_shared._pid_is_alive(4321) is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 process probe")
+def test_windows_pid_probe_detects_live_and_exited_processes():
+    assert pyshmem_shared._windows_pid_is_alive(os.getpid()) is True
+    child = subprocess.run(
+        [sys.executable, "-c", "import os; print(os.getpid())"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert pyshmem_shared._windows_pid_is_alive(int(child.stdout)) is False
+
+
 def test_dlpack_cpu_snapshot_roundtrip_and_independence(shm_name):
     shm = pyshmem.create(shm_name, shape=(3,), dtype=np.float32)
     try:

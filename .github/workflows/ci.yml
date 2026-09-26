@@ -113,6 +113,10 @@ jobs:
           - "3.11"
           - "3.12"
           - "3.13"
+        include:
+          # Downstream projects (pyRTC) run soft-RTC on Windows.
+          - os: windows-latest
+            python-version: "3.12"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
