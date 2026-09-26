@@ -2617,3 +2617,59 @@ def test_fork_resets_inherited_lock_state(shm_name):
     finally:
         shm.release()
         shm.close()
+
+
+def _finishes_within(target, seconds=5.0):
+    errors = []
+
+    def _run():
+        try:
+            target()
+        except BaseException as exc:  # surfaced by the assertion below
+            errors.append(exc)
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert not worker.is_alive(), "deadlocked"
+    assert not errors, errors
+
+
+def test_finalizer_during_lock_setup_does_not_deadlock(shm_name, monkeypatch):
+    # Garbage collection can run a SharedMemory finalizer inside any
+    # allocation, including pyshmem's own lock-file setup for another stream.
+    owner = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    stale = pyshmem.open(shm_name)
+    other_name = f"{shm_name}_other"
+    original_open = pyshmem_shared._open_lock_file
+
+    def _open_with_finalizer(path):
+        stale.__del__()
+        return original_open(path)
+
+    monkeypatch.setattr(
+        pyshmem_shared, "_open_lock_file", _open_with_finalizer
+    )
+    try:
+        _finishes_within(
+            lambda: pyshmem.create(
+                other_name, shape=(2,), dtype=np.float32
+            ).unlink()
+        )
+    finally:
+        monkeypatch.undo()
+        owner.unlink()
+
+
+def test_finalizer_under_lock_guard_does_not_deadlock(shm_name):
+    owner = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    stale = pyshmem.open(shm_name)
+
+    def _finalize_while_guarded():
+        with pyshmem_shared._THREAD_LOCK_GUARD:
+            stale.__del__()
+
+    try:
+        _finishes_within(_finalize_while_guarded)
+    finally:
+        owner.unlink()

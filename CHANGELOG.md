@@ -5,6 +5,15 @@ All notable user-facing changes are documented here. The project follows
 
 ## Unreleased
 
+## 1.3.4 - 2026-09-26
+
+### Fixed
+
+- A handle finalized by garbage collection while pyshmem was setting up
+  another stream's lock state could deadlock the thread: the finalizer's
+  `close()` waited on the non-reentrant registry lock its own thread held.
+  Lock files are now opened outside that lock, and the lock is reentrant.
+
 ## 1.3.3 - 2026-09-26
 
 ### Fixed
