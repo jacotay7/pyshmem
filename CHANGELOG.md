@@ -5,6 +5,16 @@ All notable user-facing changes are documented here. The project follows
 
 ## Unreleased
 
+## 1.3.5 - 2026-09-26
+
+### Fixed
+
+- `close()` no longer fails because another thread holds the stream's lock
+  through a *different* handle (the lock is shared per name within a process,
+  so a reader could not close its handle while a writer thread was mid-write).
+  Closing a handle that another thread is using inside its lock scope is
+  still refused.
+
 ## 1.3.4 - 2026-09-26
 
 ### Fixed

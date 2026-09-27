@@ -2673,3 +2673,43 @@ def test_finalizer_under_lock_guard_does_not_deadlock(shm_name):
         _finishes_within(_finalize_while_guarded)
     finally:
         owner.unlink()
+
+
+def _hold_lock_in_thread(handle):
+    acquired, release = threading.Event(), threading.Event()
+
+    def _hold():
+        with handle.locked():
+            acquired.set()
+            release.wait(5.0)
+
+    worker = threading.Thread(target=_hold, daemon=True)
+    worker.start()
+    assert acquired.wait(5.0)
+    return worker, release
+
+
+def test_close_succeeds_while_another_handle_holds_the_lock(shm_name):
+    # The lock is shared per name; a reader closing its own handle must not
+    # fail because a writer thread is mid-write through a different handle.
+    writer = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    reader = pyshmem.open(shm_name)
+    worker, release = _hold_lock_in_thread(writer)
+    try:
+        reader.close()
+    finally:
+        release.set()
+        worker.join(5.0)
+        writer.unlink()
+
+
+def test_close_refuses_a_handle_locked_by_another_thread(shm_name):
+    writer = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    worker, release = _hold_lock_in_thread(writer)
+    try:
+        with pytest.raises(RuntimeError, match="another thread owns its lock"):
+            writer.close()
+    finally:
+        release.set()
+        worker.join(5.0)
+        writer.unlink()

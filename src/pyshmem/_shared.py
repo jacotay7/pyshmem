@@ -1634,6 +1634,9 @@ class SharedMemory:
         self._total_missed_writes = 0
         self._lock_state = _lock_state(name)
         self._lock_state_released = False
+        # Lock levels acquired through *this* handle. The lock itself is
+        # shared per name, so another handle's holder must not block close().
+        self._held_depth = 0
         self._closed = False
         self._auto_unlink = False
 
@@ -2165,6 +2168,7 @@ class SharedMemory:
         thread_id = threading.get_ident()
         if self._lock_state.owner_thread_id == thread_id:
             self._lock_state.depth += 1
+            self._held_depth += 1
             self._lock_metadata_on_acquire()
             return
 
@@ -2188,6 +2192,7 @@ class SharedMemory:
 
         self._lock_state.owner_thread_id = thread_id
         self._lock_state.depth = 1
+        self._held_depth += 1
         self._lock_metadata_on_acquire()
 
     def release(self) -> None:
@@ -2200,6 +2205,7 @@ class SharedMemory:
             raise RuntimeError("cannot release a lock owned by another thread")
 
         self._lock_state.depth -= 1
+        self._held_depth = max(0, self._held_depth - 1)
         self._lock_metadata_on_release()
         if self._lock_state.depth == 0:
             self._lock_state.owner_thread_id = None
@@ -2474,13 +2480,17 @@ class SharedMemory:
         if self._closed:
             return
         if self._lock_state.owner_thread_id is not None:
-            if not self._lock_owned_by_current_thread():
+            if self._lock_owned_by_current_thread():
+                while self._lock_state.owner_thread_id is not None:
+                    self.release()
+            elif self._held_depth > 0:
+                # Another thread is inside this handle's lock scope.
                 raise RuntimeError(
                     "cannot close shared memory while another thread "
                     "owns its lock"
                 )
-            while self._lock_state.owner_thread_id is not None:
-                self.release()
+            # Otherwise another handle holds the per-name lock; that handle
+            # keeps the shared lock state alive and this one can close.
         for segment in (
             self._gpu_handle_shm,
             self._metadata_shm,
