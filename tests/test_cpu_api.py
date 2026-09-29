@@ -325,6 +325,47 @@ def test_cpu_stream_can_be_opened_in_another_process(shm_name):
     writer.close()
 
 
+def _write_until_stopped(name: str, started, stop) -> None:
+    shm = pyshmem.open(name)
+    payload = np.zeros(64, dtype=np.float32)
+    started.set()
+    while not stop.is_set():
+        shm.write(payload)
+    shm.close()
+
+
+def test_open_succeeds_while_another_process_writes(shm_name):
+    # Validating the live header in place rejected about 4% of opens against a
+    # tight writer loop ("lock owner and depth metadata are inconsistent",
+    # "invalid count in metadata: array(662)").
+    owner = pyshmem.create(shm_name, shape=(64,), dtype=np.float32)
+    owner.write(np.zeros(64, dtype=np.float32))
+    context = mp.get_context("spawn")
+    started, stop = context.Event(), context.Event()
+    writer = context.Process(
+        target=_write_until_stopped, args=(shm_name, started, stop)
+    )
+    writer.start()
+    failures = []
+    opens = 0
+    try:
+        assert started.wait(timeout=20)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            try:
+                pyshmem.open(shm_name, readonly=True).close()
+                opens += 1
+            except ValueError as exc:
+                failures.append(str(exc))
+    finally:
+        stop.set()
+        writer.join(timeout=20)
+        owner.close()
+    assert writer.exitcode == 0
+    assert opens > 0
+    assert failures == []
+
+
 @pytest.mark.skipif(
     WINDOWS_SHARED_MEMORY_IS_EPHEMERAL,
     reason=(
