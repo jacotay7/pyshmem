@@ -5,6 +5,16 @@ All notable user-facing changes are documented here. The project follows
 
 ## Unreleased
 
+## 1.3.7 - 2026-09-29
+
+### Changed
+
+- **`import pyshmem` no longer imports torch.** torch is imported on the first
+  GPU operation (`gpu_available()`, creating or opening a GPU stream, or
+  reading `GPU_SUPPORTED_DTYPES`). With torch installed, this cuts
+  `import pyshmem` from about 1 s to about 0.1 s, and CPU-only processes never
+  load torch. `pyshmem._shared.torch` is now a lazy stand-in for the module.
+
 ## 1.3.6 - 2026-09-28
 
 ### Fixed

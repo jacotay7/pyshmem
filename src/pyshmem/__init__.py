@@ -2,8 +2,8 @@
 
 from importlib.metadata import PackageNotFoundError, version
 
+from pyshmem import _shared
 from pyshmem._shared import (
-    GPU_SUPPORTED_DTYPES,
     InconsistentStreamError,
     Publication,
     StaleStreamError,
@@ -19,6 +19,14 @@ from pyshmem._shared import (
     unlink,
     unlink_quiet,
 )
+
+
+def __getattr__(name: str):
+    # GPU_SUPPORTED_DTYPES needs torch, which is imported only on first use.
+    if name == "GPU_SUPPORTED_DTYPES":
+        return _shared.GPU_SUPPORTED_DTYPES
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 try:
     __version__ = version("pyshmem")
