@@ -47,7 +47,7 @@ _torch_module: Any = _TORCH_UNSET
 
 
 def _load_torch():
-    """Import torch on first use; return the module, or ``None`` if unavailable.
+    """Import torch on first use; return it, or ``None`` if unavailable.
 
     Importing torch takes most of a second, so CPU-only users of pyshmem
     should never pay for it: it is imported only by GPU code paths.
@@ -63,7 +63,7 @@ def _load_torch():
 
 
 class _LazyTorch:
-    """Stand-in for the ``torch`` module that imports it on first attribute access."""
+    """Stand-in for ``torch`` that imports it on first attribute access."""
 
     __slots__ = ()
 
@@ -101,7 +101,7 @@ DTYPE_TO_CODE = {dtype: index for index, dtype in enumerate(DTYPE_TABLE)}
 
 @functools.lru_cache(maxsize=None)
 def _torch_dtype_map() -> dict:
-    """Map each supported numpy dtype to its torch dtype (empty without torch)."""
+    """Map each supported numpy dtype to its torch dtype ({} sans torch)."""
     module = _load_torch()
     if module is None:
         return {}
