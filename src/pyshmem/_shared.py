@@ -20,6 +20,7 @@ import builtins
 from contextlib import ExitStack, contextmanager
 import ctypes
 import ctypes.util
+import functools
 import glob
 import inspect
 import io
@@ -1559,6 +1560,36 @@ def stat(name: str) -> dict[str, Any]:
             pass
 
 
+def _guarded_read(method):
+    """Count a blocking read as in flight so close() can wake and wait for it.
+
+    Only the blocking read methods are guarded: they can park on a handle for
+    a long time, while the non-blocking reads return in microseconds and stay
+    free of the extra locking on the real-time hot path.
+    """
+    if inspect.iscoroutinefunction(method):
+
+        @functools.wraps(method)
+        async def _async_wrapper(self, *args, **kwargs):
+            self._enter_read()
+            try:
+                return await method(self, *args, **kwargs)
+            finally:
+                self._exit_read()
+
+        return _async_wrapper
+
+    @functools.wraps(method)
+    def _wrapper(self, *args, **kwargs):
+        self._enter_read()
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._exit_read()
+
+    return _wrapper
+
+
 class SharedMemory:
     """A named shared-memory stream.
 
@@ -1637,6 +1668,11 @@ class SharedMemory:
         # Lock levels acquired through *this* handle. The lock itself is
         # shared per name, so another handle's holder must not block close().
         self._held_depth = 0
+        # Reads in progress on this handle; close() waits for them to leave
+        # before unmapping so a blocked reader never touches freed memory.
+        self._inflight_reads = 0
+        self._inflight_cond = threading.Condition()
+        self._closing = False
         self._closed = False
         self._auto_unlink = False
 
@@ -1787,6 +1823,28 @@ class SharedMemory:
                 f"reopen it with pyshmem.open({self.name!r})"
             )
 
+    def _enter_read(self) -> None:
+        with self._inflight_cond:
+            self._ensure_open("read from")
+            if self._closing:
+                raise RuntimeError(
+                    f"cannot read from shared memory {self.name!r} while it "
+                    "is being closed"
+                )
+            self._inflight_reads += 1
+
+    def _exit_read(self) -> None:
+        with self._inflight_cond:
+            self._inflight_reads -= 1
+            self._inflight_cond.notify_all()
+
+    def _raise_if_closing(self) -> None:
+        if self._closing:
+            raise RuntimeError(
+                f"shared memory {self.name!r} was closed while a read was "
+                "waiting on it"
+            )
+
     def _ensure_writable(self, operation: str) -> None:
         if self.readonly:
             raise PermissionError(
@@ -1902,6 +1960,7 @@ class SharedMemory:
                     f"timed out waiting for a stable write on {self.name!r}"
                 )
             time.sleep(poll_interval)
+            self._raise_if_closing()
 
     def _finish_write(self) -> None:
         count = int(self._metadata[METADATA_INDEX_COUNT]) + 1
@@ -1969,6 +2028,7 @@ class SharedMemory:
                 self._park_once(cap)
         else:
             time.sleep(poll_interval)
+        self._raise_if_closing()
 
     async def _wait_for_publication_async(
         self, poll_interval: float, remaining: float | None
@@ -1984,6 +2044,7 @@ class SharedMemory:
                 await asyncio.to_thread(self._park_once, cap)
         else:
             await asyncio.sleep(poll_interval)
+        self._raise_if_closing()
 
     def _lock_metadata_on_acquire(self) -> None:
         self._metadata[METADATA_INDEX_LOCK_OWNER_PID] = os.getpid()
@@ -2475,10 +2536,33 @@ class SharedMemory:
             torch_dtype=torch_dtype,
         )
 
-    def close(self) -> None:
-        """Close this local handle without destroying the underlying stream."""
+    def close(self, *, timeout: float = 5.0) -> None:
+        """Close this local handle without destroying the underlying stream.
+
+        Reads blocked on this handle in other threads are woken and raise
+        ``RuntimeError``; close waits up to ``timeout`` seconds for them to
+        leave before unmapping the segments.
+        """
         if self._closed:
             return
+        with self._inflight_cond:
+            self._closing = True
+        if self._inflight_reads:
+            if self._notify and self._seq_word_addr is not None:
+                _futex_wake(self._seq_word_addr)
+            deadline = time.monotonic() + max(0.0, float(timeout))
+            with self._inflight_cond:
+                while self._inflight_reads:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        self._closing = False
+                        raise RuntimeError(
+                            f"cannot close shared memory {self.name!r}: "
+                            f"{self._inflight_reads} read(s) did not finish"
+                        )
+                    self._inflight_cond.wait(min(remaining, 0.05))
+                    if self._notify and self._seq_word_addr is not None:
+                        _futex_wake(self._seq_word_addr)
         if self._lock_state.owner_thread_id is not None:
             if self._lock_owned_by_current_thread():
                 while self._lock_state.owner_thread_id is not None:
@@ -2780,6 +2864,7 @@ class SharedMemory:
             poll_interval, out=out, timeout=timeout
         )
 
+    @_guarded_read
     def read_new(
         self,
         *,
@@ -2876,6 +2961,7 @@ class SharedMemory:
         )
         return self.read(safe=safe, out=out, timeout=remaining)
 
+    @_guarded_read
     def read_new_publication(
         self,
         *,
@@ -2908,6 +2994,7 @@ class SharedMemory:
             timeout=remaining,
         )
 
+    @_guarded_read
     def wait_for_count(
         self,
         *,
@@ -2972,6 +3059,7 @@ class SharedMemory:
             )
             self._wait_for_publication(poll_interval, remaining)
 
+    @_guarded_read
     def read_after(
         self,
         after: int,
@@ -3015,6 +3103,7 @@ class SharedMemory:
             timeout=remaining,
         )
 
+    @_guarded_read
     def read_after_publication(
         self,
         after: int,
@@ -3187,6 +3276,7 @@ class SharedMemory:
                 raise
             self._finish_write()
 
+    @_guarded_read
     async def read_new_async(
         self,
         *,

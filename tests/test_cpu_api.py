@@ -2713,3 +2713,72 @@ def test_close_refuses_a_handle_locked_by_another_thread(shm_name):
         release.set()
         worker.join(5.0)
         writer.unlink()
+
+
+@pytest.mark.parametrize("notify", [False, True])
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda h: h.read_new(timeout=10.0),
+        lambda h: h.read_new_publication(timeout=10.0),
+        lambda h: h.read_after(h.count, timeout=10.0),
+        lambda h: h.read_after_publication(h.count, timeout=10.0),
+        lambda h: h.wait_for_count(after=h.count, timeout=10.0),
+    ],
+    ids=[
+        "read_new",
+        "read_new_publication",
+        "read_after",
+        "read_after_publication",
+        "wait_for_count",
+    ],
+)
+def test_close_wakes_a_reader_blocked_on_the_handle(shm_name, notify, call):
+    # Closing used to unmap the segments under a reader parked in a blocking
+    # read on the same handle, which crashed the process.
+    writer = pyshmem.create(
+        shm_name, shape=(2,), dtype=np.float32, notify=notify
+    )
+    reader = pyshmem.open(shm_name)
+    outcome = {}
+
+    def _block():
+        try:
+            call(reader)
+            outcome["returned"] = True
+        except RuntimeError as exc:
+            outcome["error"] = str(exc)
+
+    worker = threading.Thread(target=_block, daemon=True)
+    worker.start()
+    time.sleep(0.2)
+    try:
+        started = time.monotonic()
+        reader.close()
+        worker.join(5.0)
+        assert not worker.is_alive()
+        assert time.monotonic() - started < 2.0
+        assert "closed while a read was waiting" in outcome.get("error", "")
+        with pytest.raises(RuntimeError, match="closed shared memory"):
+            reader.read()
+    finally:
+        writer.unlink()
+
+
+def test_close_wakes_an_async_reader(shm_name):
+    writer = pyshmem.create(shm_name, shape=(2,), dtype=np.float32)
+    reader = pyshmem.open(shm_name)
+
+    async def _scenario():
+        task = asyncio.ensure_future(reader.read_new_async(timeout=10.0))
+        await asyncio.sleep(0.2)
+        await asyncio.to_thread(reader.close)
+        with pytest.raises(
+            RuntimeError, match="closed while a read was waiting"
+        ):
+            await task
+
+    try:
+        asyncio.run(_scenario())
+    finally:
+        writer.unlink()
