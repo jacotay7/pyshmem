@@ -1089,13 +1089,47 @@ def _metadata_integer(value, field: str) -> int:
     return result
 
 
+# How long open() keeps re-validating a header that looks inconsistent.  It
+# must outlast a writer preempted between two metadata stores (for example the
+# lock owner and lock depth); real corruption is still rejected afterwards.
+_DECODE_RETRY_SECONDS = 0.05
+
+
 def _decode_metadata_header(
+    metadata_shm: shared_memory.SharedMemory,
+    *,
+    expected_name: str,
+) -> dict[str, Any]:
+    """Validate a stream's metadata and return a normalized description.
+
+    A live writer updates the count, sequence, write time and lock fields while
+    this runs.  Checking the shared header in place read those fields more than
+    once (``float(view)`` then ``int(view)``) and saw the lock owner set before
+    its depth, so ``open()`` rejected healthy streams that were being written.
+    Each attempt validates a private copy instead, and a failure is retried on
+    a fresh copy for ``_DECODE_RETRY_SECONDS``: a torn copy clears up once the
+    writer finishes its update, real corruption persists.
+    """
+    deadline = time.monotonic() + _DECODE_RETRY_SECONDS
+    while True:
+        snapshot = _MetadataView(bytearray(metadata_shm.buf[:METADATA_BYTES]))
+        try:
+            return _validate_metadata_header(
+                snapshot, metadata_shm, expected_name=expected_name
+            )
+        except ValueError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.001)
+
+
+def _validate_metadata_header(
     metadata: _MetadataView,
     metadata_shm: shared_memory.SharedMemory,
     *,
     expected_name: str,
 ) -> dict[str, Any]:
-    """Validate metadata fields and return a normalized stream description."""
+    """Validate one metadata snapshot (see ``_decode_metadata_header``)."""
     if metadata.layout_version == METADATA_VERSION:
         # The segment must be *at least* the header + name region.  macOS and
         # Windows round shared-memory sizes up to a page, so an exact check
@@ -1522,8 +1556,7 @@ def _validated_stream_name_for_base(base: str) -> str | None:
         stream_name = _read_stream_name(meta_shm)
         if stream_name is None or _segment_base_name(stream_name) != base:
             return None
-        metadata = _MetadataView(meta_shm.buf)
-        _decode_metadata_header(metadata, meta_shm, expected_name=stream_name)
+        _decode_metadata_header(meta_shm, expected_name=stream_name)
         return stream_name
     except (TypeError, ValueError, BufferError):
         return None
@@ -1574,9 +1607,7 @@ def stat(name: str) -> dict[str, Any]:
         raise _missing_name_error(name) from exc
     try:
         metadata = _MetadataView(metadata_shm.buf)
-        decoded = _decode_metadata_header(
-            metadata, metadata_shm, expected_name=name
-        )
+        decoded = _decode_metadata_header(metadata_shm, expected_name=name)
         flags = int(metadata._v3["flags"]) if metadata._v3 is not None else 0
         device_index = decoded["device_index"]
         return {
@@ -2480,7 +2511,7 @@ class SharedMemory:
         except FileNotFoundError as exc:
             raise _missing_name_error(name) from exc
         try:
-            metadata = _MetadataView(metadata_shm.buf)
+            _MetadataView(metadata_shm.buf)
         except ValueError as exc:
             metadata_shm.close()
             raise ValueError(
@@ -2488,9 +2519,7 @@ class SharedMemory:
             ) from exc
 
         try:
-            decoded = _decode_metadata_header(
-                metadata, metadata_shm, expected_name=name
-            )
+            decoded = _decode_metadata_header(metadata_shm, expected_name=name)
         except ValueError:
             metadata_shm.close()
             raise

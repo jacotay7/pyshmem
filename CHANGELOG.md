@@ -5,6 +5,21 @@ All notable user-facing changes are documented here. The project follows
 
 ## Unreleased
 
+## 1.3.8 - 2026-09-29
+
+### Fixed
+
+- **`open()`, `stat()` and stream discovery no longer reject a stream that
+  another process is writing.** They validated the live metadata header in
+  place, so a concurrent write could land between two reads of one field or
+  between the lock owner and lock depth updates. About 0.2% of opens against a
+  1 kHz writer failed (4% against a tight write loop) with errors such as
+  `lock owner and depth metadata are inconsistent` or
+  `invalid count in metadata: array(662)`, and `list_streams()` could briefly
+  omit such a stream. Validation now runs on a private copy of the header and
+  retries for up to 50 ms (enough for a writer preempted between two metadata
+  updates), so persistent corruption is still rejected.
+
 ## 1.3.7 - 2026-09-29
 
 ### Changed
