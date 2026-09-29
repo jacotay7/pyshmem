@@ -5,6 +5,17 @@ All notable user-facing changes are documented here. The project follows
 
 ## Unreleased
 
+## 1.3.6 - 2026-09-28
+
+### Fixed
+
+- Closing a handle while another thread was blocked on it in `read_new`,
+  `read_after`, `wait_for_count` (or their `_publication`/async variants)
+  unmapped the segments under the waiting reader and crashed the process.
+  `close()` now wakes such readers (they raise `RuntimeError`) and waits for
+  them to leave before unmapping; it takes a `timeout` (default 5 s).
+  Non-blocking reads are unaffected and pay no extra cost.
+
 ## 1.3.5 - 2026-09-26
 
 ### Fixed
