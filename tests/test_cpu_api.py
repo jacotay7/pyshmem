@@ -2782,3 +2782,24 @@ def test_close_wakes_an_async_reader(shm_name):
         asyncio.run(_scenario())
     finally:
         writer.unlink()
+
+
+def test_importing_pyshmem_and_cpu_streams_do_not_import_torch(tmp_path):
+    """torch takes most of a second to import; CPU-only use must not pay it."""
+    import subprocess
+    import sys
+    import uuid
+
+    name = f"lazy_torch_{uuid.uuid4().hex[:8]}"
+    code = (
+        "import sys, numpy as np, pyshmem;"
+        f"s = pyshmem.create({name!r}, shape=(4,), dtype=np.float32);"
+        "s.write(np.ones(4, np.float32)); s.read(); s.close(); pyshmem.unlink("
+        f"{name!r});"
+        "print('torch' in sys.modules)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "False"

@@ -42,10 +42,42 @@ from typing import Any, Sequence
 import numpy as np
 import portalocker
 
-try:
-    import torch
-except Exception:
-    torch = None
+_TORCH_UNSET = object()
+_torch_module: Any = _TORCH_UNSET
+
+
+def _load_torch():
+    """Import torch on first use; return it, or ``None`` if unavailable.
+
+    Importing torch takes most of a second, so CPU-only users of pyshmem
+    should never pay for it: it is imported only by GPU code paths.
+    """
+    global _torch_module
+    if _torch_module is _TORCH_UNSET:
+        try:
+            import torch as module
+        except Exception:
+            module = None
+        _torch_module = module
+    return _torch_module
+
+
+class _LazyTorch:
+    """Stand-in for ``torch`` that imports it on first attribute access."""
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str):
+        module = _load_torch()
+        if module is None:
+            raise AttributeError(f"torch is not available (torch.{name})")
+        return getattr(module, name)
+
+    def __repr__(self) -> str:
+        return "<lazy torch module>"
+
+
+torch = _LazyTorch()
 
 
 DTYPE_TABLE = (
@@ -65,16 +97,30 @@ DTYPE_TABLE = (
     np.dtype(np.complex128),
 )
 DTYPE_TO_CODE = {dtype: index for index, dtype in enumerate(DTYPE_TABLE)}
-if torch is not None:
-    TORCH_DTYPE_MAP = {}
-    for _dtype in DTYPE_TABLE:
-        _torch_dtype = getattr(torch, _dtype.name, None)
-        if _torch_dtype is not None:
-            TORCH_DTYPE_MAP[_dtype] = _torch_dtype
-else:
-    TORCH_DTYPE_MAP = {}
 
-GPU_SUPPORTED_DTYPES: frozenset = frozenset(TORCH_DTYPE_MAP)
+
+@functools.lru_cache(maxsize=None)
+def _torch_dtype_map() -> dict:
+    """Map each supported numpy dtype to its torch dtype ({} sans torch)."""
+    module = _load_torch()
+    if module is None:
+        return {}
+    mapping = {}
+    for dtype in DTYPE_TABLE:
+        torch_dtype = getattr(module, dtype.name, None)
+        if torch_dtype is not None:
+            mapping[dtype] = torch_dtype
+    return mapping
+
+
+def __getattr__(name: str):
+    # ``TORCH_DTYPE_MAP`` and ``GPU_SUPPORTED_DTYPES`` need torch, so they are
+    # computed on first access instead of at import (PEP 562).
+    if name == "TORCH_DTYPE_MAP":
+        return _torch_dtype_map()
+    if name == "GPU_SUPPORTED_DTYPES":
+        return frozenset(_torch_dtype_map())
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @dataclass(frozen=True)
@@ -569,7 +615,8 @@ class _MetadataView:
 
 def gpu_available() -> bool:
     """Return ``True`` when CUDA-backed PyTorch streams are available."""
-    return bool(torch is not None and torch.cuda.is_available())
+    module = _load_torch()
+    return bool(module is not None and module.cuda.is_available())
 
 
 def _segment_base_name(name: str) -> str:
@@ -878,9 +925,10 @@ def _collect_cuda_ipc() -> None:
 
     Torch shares GPU tensors across processes by ref-counting them through
     ``cuda.shm.*`` segments in ``/dev/shm``.  Calling ``ipc_collect`` lets
-    torch reclaim the ones whose tensors have been dropped.  No-op sans CUDA.
+    torch reclaim the ones whose tensors have been dropped.  No-op sans CUDA,
+    and in processes that never imported torch (they hold no CUDA tensors).
     """
-    if torch is None:
+    if _torch_module is _TORCH_UNSET or _torch_module is None:
         return
     try:
         if torch.cuda.is_available():
@@ -1184,7 +1232,7 @@ def _decode_metadata_header(
 def _normalize_gpu_device(gpu_device: str | int | None) -> Any | None:
     if gpu_device is None:
         return None
-    if torch is None:
+    if _load_torch() is None:
         raise RuntimeError("PyTorch is required for GPU shared memory")
     device = torch.device(gpu_device)
     if device.type != "cuda":
@@ -1198,9 +1246,9 @@ def _normalize_gpu_device(gpu_device: str | int | None) -> Any | None:
 
 
 def _torch_dtype_for(dtype: np.dtype):
-    torch_dtype = TORCH_DTYPE_MAP.get(np.dtype(dtype))
+    torch_dtype = _torch_dtype_map().get(np.dtype(dtype))
     if torch_dtype is None:
-        _supported = ", ".join(str(d) for d in TORCH_DTYPE_MAP)
+        _supported = ", ".join(str(d) for d in _torch_dtype_map())
         raise ValueError(
             f"dtype {dtype} is not supported for GPU shared memory; "
             f"supported: {_supported}"
@@ -1269,7 +1317,7 @@ def _resolve_open_target_device(
         raise ValueError(
             f"{name!r} is GPU-backed but advertises no CUDA device"
         )
-    if torch is None or not torch.cuda.is_available():
+    if _load_torch() is None or not torch.cuda.is_available():
         if cpu_mirror:
             return None, False
         raise RuntimeError(
@@ -3498,7 +3546,7 @@ class _RestrictedCudaUnpickler(pickle.Unpickler):
             return super().find_class(module, name)
         # torch dtype singletons (e.g. ``torch.float32``) are inert data values
         # referenced as globals by the reduction payload.
-        if module == "torch" and torch is not None:
+        if module == "torch" and _load_torch() is not None:
             candidate = getattr(torch, name, None)
             if isinstance(candidate, torch.dtype):
                 return candidate
