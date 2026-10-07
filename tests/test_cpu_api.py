@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from importlib.metadata import version
 import math
@@ -898,6 +899,16 @@ def test_open_accepts_legacy_v2_metadata(shm_name):
             np.testing.assert_array_equal(publication.payload, payload)
             assert publication.frame_id == 0
             assert publication.count == 0
+            # Publishing through the legacy layout updates its float64 slots.
+            replacement = np.array([5.0, 6.0, 7.0, 8.0], dtype=np.float32)
+            opened.write(replacement, frame_id=9)
+            publication = opened.read_publication()
+            np.testing.assert_array_equal(publication.payload, replacement)
+            assert publication.count == 1
+            assert publication.frame_id == 0
+            assert publication.write_time > 0.0
+            assert opened.write_sequence == 2
+            assert legacy[pyshmem_shared.METADATA_INDEX_LOCK_OWNER_PID] == 0
         finally:
             opened.close()
     finally:
@@ -1363,6 +1374,74 @@ def test_notify_read_new_timeout_is_honored(shm_name):
         with pytest.raises(TimeoutError):
             reader.read_new(timeout=0.2)
         assert time.monotonic() - started < 2.0
+    finally:
+        reader.close()
+        writer.unlink()
+
+
+@pytest.mark.skipif(
+    not pyshmem_shared._FUTEX_AVAILABLE,
+    reason="kernel notifications need a Linux futex",
+)
+def test_notify_wait_sees_publication_between_check_and_park(
+    shm_name, monkeypatch
+):
+    # A publication that lands after wait_for_count samples the count but
+    # before it parks must not be slept through until the park cap expires:
+    # the park has to compare against the sequence the check observed.
+    monkeypatch.setattr(pyshmem_shared, "_NOTIFY_MAX_PARK", 10.0)
+    writer = pyshmem.create(
+        shm_name, shape=(2,), dtype=np.float32, notify=True
+    )
+    reader = pyshmem.open(shm_name)
+    sample = reader._sample_publication_state
+    published = []
+
+    def sample_then_publish(**kwargs):
+        state = sample(**kwargs)
+        if not published:
+            published.append(True)
+            writer.write(np.ones(2, dtype=np.float32))
+        return state
+
+    monkeypatch.setattr(
+        reader, "_sample_publication_state", sample_then_publish
+    )
+    try:
+        started = time.monotonic()
+        assert reader.wait_for_count(after=0, timeout=5.0) == 1
+        assert time.monotonic() - started < 1.0
+    finally:
+        reader.close()
+        writer.unlink()
+
+
+@pytest.mark.skipif(
+    not pyshmem_shared._FUTEX_AVAILABLE,
+    reason="kernel notifications need a Linux futex",
+)
+def test_notify_read_new_sees_publication_between_check_and_park(
+    shm_name, monkeypatch
+):
+    monkeypatch.setattr(pyshmem_shared, "_NOTIFY_MAX_PARK", 10.0)
+    writer = pyshmem.create(
+        shm_name, shape=(2,), dtype=np.float32, notify=True
+    )
+    reader = pyshmem.open(shm_name)
+    wait = reader._wait_for_publication
+    published = []
+
+    def publish_then_wait(*args):
+        if not published:
+            published.append(True)
+            writer.write(np.full(2, 3.0, dtype=np.float32))
+        return wait(*args)
+
+    monkeypatch.setattr(reader, "_wait_for_publication", publish_then_wait)
+    try:
+        started = time.monotonic()
+        assert reader.read_new(timeout=5.0).tolist() == [3.0, 3.0]
+        assert time.monotonic() - started < 1.0
     finally:
         reader.close()
         writer.unlink()
@@ -2447,6 +2526,191 @@ def test_concurrent_writers_and_reader_stay_consistent(shm_name):
     assert reads > 0
 
 
+STRESS_ELEMENTS = 16_384
+
+
+def _stress_writer(name, value, start, stop, results) -> None:
+    shm = pyshmem.open(name)
+    payload = np.full(STRESS_ELEMENTS, value, dtype=np.int64)
+    writes = 0
+    try:
+        start.wait(10.0)
+        while not stop.is_set():
+            if writes % 2:
+                shm.write(payload, frame_id=value)
+            else:
+                with shm.write_view(frame_id=value) as view:
+                    view[: STRESS_ELEMENTS // 2] = value
+                    view[STRESS_ELEMENTS // 2 :] = value
+            writes += 1
+    finally:
+        shm.close()
+        results.put(("writer", writes))
+
+
+def _stress_reader(name, start, stop, results) -> None:
+    shm = pyshmem.open(name, readonly=True)
+    out = np.empty(STRESS_ELEMENTS, dtype=np.int64)
+    reads = torn = regressions = 0
+    last_count = 0
+    try:
+        start.wait(10.0)
+        while not stop.is_set():
+            publication = shm.read_publication(out=out)
+            # Every writer fills the whole payload with its own value and
+            # stamps the same value as frame_id, so any mix of generations
+            # (payload halves, or payload vs. token) is a torn snapshot.
+            if not (out == out[0]).all() or publication.frame_id != out[0]:
+                torn += 1
+            if publication.count < last_count:
+                regressions += 1
+            last_count = publication.count
+            reads += 1
+    finally:
+        shm.close()
+        results.put(("reader", (reads, torn, regressions)))
+
+
+def test_cross_process_writers_and_readers_never_tear(shm_name):
+    # Spawned writers contend for the process-shared lock while spawned
+    # readers take lock-free seqlock snapshots.  Mutual exclusion must keep
+    # every completed write counted, and readers must never accept a torn
+    # payload/token pair or see the count go backwards.
+    shm = pyshmem.create(shm_name, shape=(STRESS_ELEMENTS,), dtype=np.int64)
+    context = mp.get_context("spawn")
+    start = context.Event()
+    stop = context.Event()
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_stress_writer,
+            args=(shm_name, value, start, stop, results),
+        )
+        for value in (1, 2, 3)
+    ] + [
+        context.Process(
+            target=_stress_reader, args=(shm_name, start, stop, results)
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    try:
+        start.set()
+        time.sleep(1.5)
+        stop.set()
+        reports = [results.get(timeout=30.0) for _ in processes]
+        for process in processes:
+            process.join(timeout=30.0)
+            assert process.exitcode == 0
+    finally:
+        stop.set()
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join()
+    writes = sum(value for kind, value in reports if kind == "writer")
+    readers = [value for kind, value in reports if kind == "reader"]
+    try:
+        assert shm.count == writes
+        assert all(reads > 0 for reads, _, _ in readers)
+        assert [(torn, regressions) for _, torn, regressions in readers] == [
+            (0, 0),
+            (0, 0),
+        ]
+    finally:
+        shm.unlink()
+
+
+def test_locked_releases_the_lock_when_the_block_raises(shm_name):
+    shm = pyshmem.create(shm_name, shape=(1,), dtype=np.float32)
+    scope = shm.locked(timeout=1.0)
+    try:
+        with pytest.raises(KeyError):
+            with scope as handle:
+                assert handle is shm
+                assert shm._lock_state.depth == 1
+                raise KeyError("boom")
+        assert shm._lock_state.depth == 0
+        assert shm._lock_state.owner_thread_id is None
+        # The lock is free again for a fresh scope.
+        with shm.locked(timeout=1.0):
+            shm.write_locked(np.ones(1, dtype=np.float32))
+        assert shm.count == 1
+    finally:
+        shm.unlink()
+
+
+def test_locked_many_releases_acquired_locks_when_one_times_out(shm_name):
+    first = pyshmem.create(f"{shm_name}_a", shape=(1,), dtype=np.float32)
+    second = pyshmem.create(f"{shm_name}_b", shape=(1,), dtype=np.float32)
+    blocker = threading.Event()
+    release = threading.Event()
+
+    def hold_second():
+        with second.locked():
+            blocker.set()
+            release.wait(5.0)
+
+    thread = threading.Thread(target=hold_second)
+    thread.start()
+    try:
+        assert blocker.wait(5.0)
+        with pytest.raises(TimeoutError):
+            with pyshmem.locked_many([second, first], timeout=0.05):
+                pass
+        # The first lock (taken before the timeout) was released again.
+        assert first._lock_state.depth == 0
+        assert first._lock_state.owner_thread_id is None
+    finally:
+        release.set()
+        thread.join(5.0)
+        first.unlink()
+        second.unlink()
+
+
+def test_locked_many_accepts_duck_typed_handles(shm_name):
+    # Anything with a name and a locked() context manager still works (test
+    # doubles in downstream projects rely on this), and exceptions from the
+    # block reach each handle's own context manager.
+    events: list[tuple[str, str]] = []
+
+    class Handle:
+        def __init__(self, name):
+            self.name = name
+
+        @contextmanager
+        def locked(self, *, timeout=None, poll_interval=1e-3):
+            events.append(("enter", self.name))
+            try:
+                yield self
+            except KeyError:
+                events.append(("saw KeyError", self.name))
+                raise
+            finally:
+                events.append(("exit", self.name))
+
+    real = pyshmem.create(shm_name, shape=(1,), dtype=np.float32)
+    fakes = [Handle(f"{shm_name}_b"), Handle(f"{shm_name}_a")]
+    try:
+        with pytest.raises(KeyError):
+            with pyshmem.locked_many([*fakes, real], timeout=1.0) as handles:
+                assert handles == (*fakes, real)
+                assert real._lock_state.depth == 1
+                raise KeyError("boom")
+        assert real._lock_state.depth == 0
+        assert events == [
+            ("enter", f"{shm_name}_a"),
+            ("enter", f"{shm_name}_b"),
+            ("saw KeyError", f"{shm_name}_b"),
+            ("exit", f"{shm_name}_b"),
+            ("saw KeyError", f"{shm_name}_a"),
+            ("exit", f"{shm_name}_a"),
+        ]
+    finally:
+        real.unlink()
+
+
 def test_read_timeout_bounds_in_progress_write(shm_name):
     shm = pyshmem.create(shm_name, shape=(1,), dtype=np.float32)
     shm._mark_write_started()
@@ -2522,6 +2786,26 @@ def test_refresh_if_stale_rebinds_new_inode(tmp_path):
             assert state.inode == os.stat(path).st_ino
         finally:
             fresh_handle.close()
+    finally:
+        state.file_handle.close()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="inode generation semantics require POSIX",
+)
+def test_refresh_if_stale_recreates_a_removed_lock_file(tmp_path):
+    path = str(tmp_path / "probe.lock")
+    state = pyshmem_shared._SharedLockState(path)
+    handle_before = state.file_handle
+    try:
+        # The lock file was unlinked and nothing recreated it yet: the stale
+        # descriptor is replaced by a fresh file at the same pathname.
+        os.unlink(path)
+        state.refresh_if_stale()
+        assert state.file_handle is not handle_before
+        assert handle_before.closed
+        assert state.inode == os.stat(path).st_ino
     finally:
         state.file_handle.close()
 

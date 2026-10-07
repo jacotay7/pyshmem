@@ -42,6 +42,11 @@ from typing import Any, Sequence
 import numpy as np
 import portalocker
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows uses portalocker's msvcrt
+    fcntl = None
+
 _TORCH_UNSET = object()
 _torch_module: Any = _TORCH_UNSET
 
@@ -268,29 +273,33 @@ _ATOMIC_ACQUIRE = 2
 _ATOMIC_RELEASE = 3
 _ATOMIC_SEQ_CST = 5
 _DIRECT_ATOMIC_ARCH = platform.machine().lower() in {"x86_64", "amd64"}
+_UINT64_MASK = 0xFFFFFFFFFFFFFFFF
 
 
 class _LibAtomic:
     """Minimal 64-bit acquire/release wrapper around GCC's libatomic."""
 
     def __init__(self, library) -> None:
-        self._load = getattr(library, "__atomic_load_8")
+        # ``library[name]`` returns a fresh function pointer each time, so the
+        # signed and unsigned loads can declare their own result types and
+        # avoid a per-call conversion on the publication hot path.
+        self._load = library["__atomic_load_8"]
         self._load.argtypes = [ctypes.c_void_p, ctypes.c_int]
         self._load.restype = ctypes.c_uint64
-        self._store = getattr(library, "__atomic_store_8")
+        self._load_signed = library["__atomic_load_8"]
+        self._load_signed.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self._load_signed.restype = ctypes.c_int64
+        self._store = library["__atomic_store_8"]
         self._store.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_int]
         self._store.restype = None
 
     def load(self, address: int, *, signed: bool) -> int:
-        value = self._load(address, _ATOMIC_ACQUIRE)
-        return ctypes.c_int64(value).value if signed else int(value)
+        if signed:
+            return self._load_signed(address, _ATOMIC_ACQUIRE)
+        return self._load(address, _ATOMIC_ACQUIRE)
 
     def store(self, address: int, value: int, *, order: int) -> None:
-        self._store(
-            address,
-            ctypes.c_uint64(value).value,
-            order,
-        )
+        self._store(address, value & _UINT64_MASK, order)
 
 
 def _load_native_atomics() -> _LibAtomic | None:
@@ -327,33 +336,50 @@ _FUTEX_AVAILABLE = _SYS_FUTEX is not None
 
 if _FUTEX_AVAILABLE:
     _LIBC = ctypes.CDLL(None, use_errno=True)
-    _LIBC.syscall.restype = ctypes.c_long
 
     class _timespec(ctypes.Structure):
         _fields_ = [("tv_sec", ctypes.c_long), ("tv_nsec", ctypes.c_long)]
 
+    def _futex_syscall(value_type, timeout_type):
+        # ``_LIBC[name]`` is a fresh function pointer, so wait and wake each
+        # get a typed prototype.  Declared argtypes let ctypes convert plain
+        # Python ints directly instead of building a wrapper object per
+        # argument on every publication.  (Linux passes these variadic
+        # ``syscall`` arguments exactly like fixed ones.)
+        function = _LIBC["syscall"]
+        function.restype = ctypes.c_long
+        function.argtypes = [
+            ctypes.c_long,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            value_type,
+            timeout_type,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        return function
+
+    _FUTEX_WAIT_SYSCALL = _futex_syscall(
+        ctypes.c_uint32, ctypes.POINTER(_timespec)
+    )
+    _FUTEX_WAKE_SYSCALL = _futex_syscall(ctypes.c_int, ctypes.c_void_p)
+
     def _futex_wait(addr: int, expected: int, timeout: float) -> None:
         seconds = int(timeout)
         ts = _timespec(seconds, int((timeout - seconds) * 1_000_000_000))
-        _LIBC.syscall(
-            ctypes.c_long(_SYS_FUTEX),
-            ctypes.c_void_p(addr),
-            ctypes.c_int(_FUTEX_WAIT),
-            ctypes.c_uint32(expected & 0xFFFFFFFF),
-            ctypes.byref(ts),
-            ctypes.c_void_p(0),
-            ctypes.c_int(0),
+        _FUTEX_WAIT_SYSCALL(
+            _SYS_FUTEX,
+            addr,
+            _FUTEX_WAIT,
+            expected & 0xFFFFFFFF,
+            ts,
+            None,
+            0,
         )
 
     def _futex_wake(addr: int, count: int = 2**31 - 1) -> None:
-        _LIBC.syscall(
-            ctypes.c_long(_SYS_FUTEX),
-            ctypes.c_void_p(addr),
-            ctypes.c_int(_FUTEX_WAKE),
-            ctypes.c_int(count),
-            ctypes.c_void_p(0),
-            ctypes.c_void_p(0),
-            ctypes.c_int(0),
+        _FUTEX_WAKE_SYSCALL(
+            _SYS_FUTEX, addr, _FUTEX_WAKE, count, None, None, 0
         )
 
 else:  # pragma: no cover - exercised only on non-futex platforms
@@ -401,13 +427,22 @@ class _SharedLockState:
         the two would lock different inodes and stop serialising.  Callers must
         hold ``thread_lock`` and must not already own the file lock (depth 0),
         so no in-process holder is using the handle being replaced.
+
+        On POSIX this runs before every lock acquisition, so it asks the open
+        descriptor instead of resolving the path: pyshmem only ever unlinks
+        lock files (never renames them), so a file that still has a link is
+        still the one at ``path``.
         """
-        try:
-            current_inode = os.stat(self.path).st_ino
-        except FileNotFoundError:
-            current_inode = None
-        if current_inode == self.inode:
-            return
+        if fcntl is not None:
+            if os.fstat(self.file_handle.fileno()).st_nlink > 0:
+                return
+        else:
+            try:
+                current_inode = os.stat(self.path).st_ino
+            except FileNotFoundError:
+                current_inode = None
+            if current_inode == self.inode:
+                return
         old_handle = self.file_handle
         self.file_handle, self.inode = _open_lock_file(self.path)
         try:
@@ -422,6 +457,31 @@ class InconsistentStreamError(RuntimeError):
 
 class StaleStreamError(RuntimeError):
     """Raised when a handle targets an older generation of a stream name."""
+
+
+_V3_INDEX_FIELDS = {
+    METADATA_INDEX_VERSION: "version",
+    METADATA_INDEX_COUNT: "count",
+    METADATA_INDEX_DTYPE: "dtype_code",
+    METADATA_INDEX_NDIM: "ndim",
+    METADATA_INDEX_SIZE: "size",
+    METADATA_INDEX_DEVICE_INDEX: "device_index",
+    METADATA_INDEX_CREATOR_PID: "creator_pid",
+    METADATA_INDEX_WRITE_TIME: "write_time",
+    METADATA_INDEX_WRITE_SEQUENCE: "write_sequence",
+    METADATA_INDEX_LOCK_OWNER_PID: "lock_owner_pid",
+    METADATA_INDEX_LOCK_DEPTH: "lock_depth",
+}
+# v3 fields touched on every publication, bound once per view as little-endian
+# ctypes scalars: (attribute, header field, ctypes type).
+_V3_HOT_FIELDS = (
+    ("_count_field", "count", ctypes.c_uint64),
+    ("_sequence_field", "write_sequence", ctypes.c_int64),
+    ("_write_time_field", "write_time", ctypes.c_double),
+    ("_lock_owner_pid_field", "lock_owner_pid", ctypes.c_int64),
+    ("_lock_depth_field", "lock_depth", ctypes.c_uint32),
+    ("_frame_id_field", "frame_id", ctypes.c_uint64),
+)
 
 
 class _MetadataView:
@@ -441,6 +501,7 @@ class _MetadataView:
             self._v3["magic"] = METADATA_MAGIC
             self._v3["version"] = METADATA_VERSION
             self._v3["header_size"] = METADATA_BYTES
+            self._bind_hot_fields()
             return
 
         if bytes(buffer[: len(METADATA_MAGIC)]) == METADATA_MAGIC:
@@ -454,6 +515,7 @@ class _MetadataView:
                 )
             if int(self._v3["header_size"]) != METADATA_BYTES:
                 raise ValueError("invalid pyshmem metadata header size")
+            self._bind_hot_fields()
             return
 
         self._v3 = None
@@ -465,6 +527,26 @@ class _MetadataView:
             raise ValueError(
                 f"unsupported pyshmem metadata version: {self.layout_version}"
             )
+
+    def _bind_hot_fields(self) -> None:
+        """Bind scalar views of the per-publication v3 header fields.
+
+        Structured NumPy field access (``self._v3["count"]``) and exporting
+        the structured array to ctypes both cost far more than the load or
+        store itself, and these fields are touched several times per read and
+        write.  The views are bound once by address, exactly like the NumPy
+        view they sit beside: neither holds a buffer export, so ``close()``
+        still unmaps the segment, and neither may be used after it.
+        """
+        base = self._v3.ctypes.data
+        fields = METADATA_V3_DTYPE.fields
+        for attribute, field, ctype in _V3_HOT_FIELDS:
+            setattr(
+                self,
+                attribute,
+                ctype.__ctype_le__.from_address(base + fields[field][1]),
+            )
+        self._sequence_address = base + fields["write_sequence"][1]
 
     def _flags(self) -> int:
         return int(self._v3["flags"])
@@ -493,20 +575,16 @@ class _MetadataView:
         return ctypes.addressof(ctypes.c_char.from_buffer(self._v3, offset))
 
     def load_publication_state_acquire(self) -> tuple[int, int] | None:
-        if not self.native_atomics:
+        if self._v3 is None:
             return None
         if _DIRECT_ATOMIC_ARCH:
-            return (
-                int(self._v3["write_sequence"]),
-                int(self._v3["count"]),
-            )
-        sequence = _NATIVE_ATOMICS.load(
-            self._atomic_address("write_sequence"), signed=True
-        )
+            return self._sequence_field.value, self._count_field.value
+        if _NATIVE_ATOMICS is None:
+            return None
+        sequence = _NATIVE_ATOMICS.load(self._sequence_address, signed=True)
         # The acquired final sequence publication makes the preceding ordinary
         # count and payload stores visible.
-        count = int(self._v3["count"])
-        return sequence, count
+        return sequence, self._count_field.value
 
     def load_sequence_acquire(self) -> int:
         state = self.load_publication_state_acquire()
@@ -514,18 +592,32 @@ class _MetadataView:
             return int(self[METADATA_INDEX_WRITE_SEQUENCE])
         return state[0]
 
+    def load_sequence_owned(self) -> int:
+        """Load the sequence from inside the stream lock's critical section.
+
+        Only the lock holder stores the sequence, and taking the
+        process-shared lock already orders this load after the previous
+        holder's final store, so the writer needs no atomic load (one ctypes
+        call each) to read back its own counter.
+        """
+        if self._v3 is None:
+            return int(self._v2[METADATA_INDEX_WRITE_SEQUENCE])
+        return self._sequence_field.value
+
     def load_count_acquire(self) -> int:
-        return int(self[METADATA_INDEX_COUNT])
+        if self._v3 is None:
+            return int(self._v2[METADATA_INDEX_COUNT])
+        return self._count_field.value
 
     def store_sequence_release(
         self, value: int, *, write_started: bool = False
     ) -> None:
         if self._v3 is not None and _DIRECT_ATOMIC_ARCH:
-            self._v3["write_sequence"] = value
+            self._sequence_field.value = value
             return
         if self._v3 is not None and _NATIVE_ATOMICS is not None:
             _NATIVE_ATOMICS.store(
-                self._atomic_address("write_sequence"),
+                self._sequence_address,
                 value,
                 order=_ATOMIC_SEQ_CST if write_started else _ATOMIC_RELEASE,
             )
@@ -533,37 +625,50 @@ class _MetadataView:
         self[METADATA_INDEX_WRITE_SEQUENCE] = value
 
     def store_count_release(self, value: int) -> None:
-        self[METADATA_INDEX_COUNT] = value
+        if self._v3 is None:
+            self._v2[METADATA_INDEX_COUNT] = value
+            return
+        self._count_field.value = value
+
+    @property
+    def write_time(self) -> float:
+        """Return the completion time of the latest publication."""
+        if self._v3 is None:
+            return float(self._v2[METADATA_INDEX_WRITE_TIME])
+        return self._write_time_field.value
+
+    @write_time.setter
+    def write_time(self, value: float) -> None:
+        if self._v3 is None:
+            self._v2[METADATA_INDEX_WRITE_TIME] = value
+            return
+        self._write_time_field.value = value
+
+    def set_lock_owner(self, pid: int, depth: int) -> None:
+        """Record the diagnostic lock owner PID and depth."""
+        if self._v3 is None:
+            self._v2[METADATA_INDEX_LOCK_OWNER_PID] = pid
+            self._v2[METADATA_INDEX_LOCK_DEPTH] = depth
+            return
+        self._lock_owner_pid_field.value = pid
+        self._lock_depth_field.value = depth
 
     @property
     def frame_id(self) -> int:
         """Return the user publication token (0 on legacy v2 metadata)."""
         if self._v3 is None:
             return 0
-        return int(self._v3["frame_id"])
+        return self._frame_id_field.value
 
     @frame_id.setter
     def frame_id(self, value: int) -> None:
         if self._v3 is None:
             return
-        self._v3["frame_id"] = np.uint64(int(value) & 0xFFFFFFFFFFFFFFFF)
+        self._frame_id_field.value = int(value) & _UINT64_MASK
 
     def __getitem__(self, index: int):
         if self._v2 is not None:
             return self._v2[index]
-        fields = {
-            METADATA_INDEX_VERSION: "version",
-            METADATA_INDEX_COUNT: "count",
-            METADATA_INDEX_DTYPE: "dtype_code",
-            METADATA_INDEX_NDIM: "ndim",
-            METADATA_INDEX_SIZE: "size",
-            METADATA_INDEX_DEVICE_INDEX: "device_index",
-            METADATA_INDEX_CREATOR_PID: "creator_pid",
-            METADATA_INDEX_WRITE_TIME: "write_time",
-            METADATA_INDEX_WRITE_SEQUENCE: "write_sequence",
-            METADATA_INDEX_LOCK_OWNER_PID: "lock_owner_pid",
-            METADATA_INDEX_LOCK_DEPTH: "lock_depth",
-        }
         if index == METADATA_INDEX_GPU_ENABLED:
             return bool(self._flags() & METADATA_FLAG_GPU_ENABLED)
         if index == METADATA_INDEX_CPU_MIRROR_ENABLED:
@@ -571,7 +676,7 @@ class _MetadataView:
         if index >= METADATA_INDEX_SHAPE_START:
             return self._v3["shape"][index - METADATA_INDEX_SHAPE_START]
         try:
-            return self._v3[fields[index]]
+            return self._v3[_V3_INDEX_FIELDS[index]]
         except KeyError as exc:
             raise IndexError(index) from exc
 
@@ -579,19 +684,6 @@ class _MetadataView:
         if self._v2 is not None:
             self._v2[index] = value
             return
-        fields = {
-            METADATA_INDEX_VERSION: "version",
-            METADATA_INDEX_COUNT: "count",
-            METADATA_INDEX_DTYPE: "dtype_code",
-            METADATA_INDEX_NDIM: "ndim",
-            METADATA_INDEX_SIZE: "size",
-            METADATA_INDEX_DEVICE_INDEX: "device_index",
-            METADATA_INDEX_CREATOR_PID: "creator_pid",
-            METADATA_INDEX_WRITE_TIME: "write_time",
-            METADATA_INDEX_WRITE_SEQUENCE: "write_sequence",
-            METADATA_INDEX_LOCK_OWNER_PID: "lock_owner_pid",
-            METADATA_INDEX_LOCK_DEPTH: "lock_depth",
-        }
         if index in (
             METADATA_INDEX_GPU_ENABLED,
             METADATA_INDEX_CPU_MIRROR_ENABLED,
@@ -608,7 +700,7 @@ class _MetadataView:
             self._v3["shape"][index - METADATA_INDEX_SHAPE_START] = value
             return
         try:
-            self._v3[fields[index]] = value
+            self._v3[_V3_INDEX_FIELDS[index]] = value
         except KeyError as exc:
             raise IndexError(index) from exc
 
@@ -818,6 +910,11 @@ def _get_cached_gpu_tensor(name: str) -> Any | None:
 def _acquire_file_lock(
     file_handle, *, timeout: float | None, poll_interval: float
 ) -> None:
+    if fcntl is not None:
+        _acquire_flock(
+            file_handle.fileno(), timeout=timeout, poll_interval=poll_interval
+        )
+        return
     if timeout is None:
         portalocker.lock(file_handle, portalocker.LOCK_EX)
         return
@@ -836,7 +933,34 @@ def _acquire_file_lock(
             time.sleep(poll_interval)
 
 
+def _acquire_flock(
+    fd: int, *, timeout: float | None, poll_interval: float
+) -> None:
+    """Take the POSIX lock with ``flock(2)`` directly.
+
+    This is the same primitive portalocker uses on POSIX (its default
+    ``LOCKER`` is ``fcntl.flock``), so handles from older pyshmem releases
+    still exclude each other; it skips portalocker's per-call flag validation
+    and dispatch, which cost several times the system call itself.
+    """
+    if timeout is None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return
+    deadline = time.monotonic() + float(timeout)
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("timed out waiting for shared memory lock")
+            time.sleep(poll_interval)
+
+
 def _release_file_lock(file_handle) -> None:
+    if fcntl is not None:
+        fcntl.flock(file_handle.fileno(), fcntl.LOCK_UN)
+        return
     portalocker.unlock(file_handle)
 
 
@@ -1303,7 +1427,10 @@ def _synchronize_cuda_operation(device, event_cache=None) -> None:
     concurrent callers never mutate the same event and an inherited post-fork
     handle never reuses a parent CUDA object.
     """
-    stream = torch.cuda.current_stream(device=device)
+    # Handles always carry an indexed ``cuda:N`` device; passing the bare
+    # index skips torch's per-call device normalisation on this hot path.
+    index = getattr(device, "index", None)
+    stream = torch.cuda.current_stream(device if index is None else index)
     if event_cache is None:
         event = torch.cuda.Event()
     else:
@@ -1669,6 +1796,61 @@ def _guarded_read(method):
     return _wrapper
 
 
+class _LockScope:
+    """Context manager returned by :meth:`SharedMemory.locked`.
+
+    A small class rather than a ``@contextmanager`` generator: the lock is
+    taken on every write and pipeline frame, and a generator-based context
+    costs more than the lock's own system calls.
+    """
+
+    __slots__ = ("_handle", "_timeout", "_poll_interval")
+
+    def __init__(
+        self,
+        handle: SharedMemory,
+        timeout: float | None,
+        poll_interval: float,
+    ) -> None:
+        self._handle = handle
+        self._timeout = timeout
+        self._poll_interval = poll_interval
+
+    def __enter__(self) -> SharedMemory:
+        self._handle.acquire(
+            timeout=self._timeout, poll_interval=self._poll_interval
+        )
+        return self._handle
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._handle.release()
+
+
+class _WriteView:
+    """Context manager returned by :meth:`SharedMemory.write_view_locked`.
+
+    A class rather than a ``@contextmanager`` generator because shmpipeline
+    opens one of these per output on every frame.  Entering validates the
+    handle, marks the write in progress and returns the live payload view;
+    a normal exit publishes it and an exception aborts the generation.
+    """
+
+    __slots__ = ("_handle", "_frame_id")
+
+    def __init__(self, handle: SharedMemory, frame_id: int | None) -> None:
+        self._handle = handle
+        self._frame_id = frame_id
+
+    def __enter__(self):
+        return self._handle._begin_write_view(self._frame_id)
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if exc_type is None:
+            self._handle._commit_write_view()
+        else:
+            self._handle._abort_write()
+
+
 class SharedMemory:
     """A named shared-memory stream.
 
@@ -1831,7 +2013,7 @@ class SharedMemory:
     def write_time(self) -> float:
         """Return the UNIX timestamp of the most recent completed write."""
         self._ensure_open("read write_time from")
-        return float(self._metadata[METADATA_INDEX_WRITE_TIME])
+        return self._metadata.write_time
 
     @property
     def write_sequence(self) -> int:
@@ -1869,7 +2051,7 @@ class SharedMemory:
         already stamps ``write_time``.
         """
         self._ensure_open("read age from")
-        written = float(self._metadata[METADATA_INDEX_WRITE_TIME])
+        written = self._metadata.write_time
         if written <= 0.0:
             return math.inf
         return max(0.0, time.time() - written)
@@ -1915,7 +2097,11 @@ class SharedMemory:
     def _exit_read(self) -> None:
         with self._inflight_cond:
             self._inflight_reads -= 1
-            self._inflight_cond.notify_all()
+            # Only close() ever waits on the condition, and it sets _closing
+            # under this same lock before waiting, so a reader that leaves
+            # before then has nobody to wake.
+            if self._closing:
+                self._inflight_cond.notify_all()
 
     def _raise_if_closing(self) -> None:
         if self._closing:
@@ -2042,9 +2228,9 @@ class SharedMemory:
             self._raise_if_closing()
 
     def _finish_write(self) -> None:
-        count = int(self._metadata[METADATA_INDEX_COUNT]) + 1
-        sequence = self._metadata.load_sequence_acquire() + 1
-        self._metadata[METADATA_INDEX_WRITE_TIME] = time.time()
+        count = self._metadata.load_count_acquire() + 1
+        sequence = self._metadata.load_sequence_owned() + 1
+        self._metadata.write_time = time.time()
         # Stamp the token before the releasing sequence store so it is covered
         # by the same publication bracket readers verify.
         if self._pending_frame_id is not None:
@@ -2056,7 +2242,7 @@ class SharedMemory:
             _futex_wake(self._seq_word_addr)
 
     def _mark_write_started(self) -> None:
-        sequence = self._metadata.load_sequence_acquire()
+        sequence = self._metadata.load_sequence_owned()
         if sequence < 0:
             # A previous copy failed or its writer died.  The new write fully
             # replaces the payload, so start a fresh odd generation beyond it.
@@ -2071,7 +2257,7 @@ class SharedMemory:
     def _abort_write(self) -> None:
         """Publish an invalid generation without claiming partial data."""
         self._pending_frame_id = None
-        sequence = self._metadata.load_sequence_acquire()
+        sequence = self._metadata.load_sequence_owned()
         if sequence >= 0:
             self._metadata.store_sequence_release(-max(sequence, 1))
         if self._notify:
@@ -2084,33 +2270,42 @@ class SharedMemory:
             else min(remaining, _NOTIFY_MAX_PARK)
         )
 
-    def _park_once(self, cap: float) -> None:
-        # Read the futex word immediately before waiting so a publication that
-        # lands in this window changes the word and makes the kernel's compare-
-        # and-block return at once instead of sleeping (no lost wakeup).
-        word = ctypes.c_uint32.from_address(self._seq_word_addr).value
-        _futex_wait(self._seq_word_addr, word, cap)
+    def _park_once(self, cap: float, observed_sequence: int) -> None:
+        # Block only while the futex word still holds the sequence the caller
+        # evaluated its wait condition against.  A publication after that
+        # sample changes the word, so the kernel's compare-and-block returns
+        # at once instead of sleeping (no lost wakeup).  Re-reading the word
+        # here instead would let a publication that landed between the
+        # caller's check and this park go unnoticed until the cap expired.
+        _futex_wait(self._seq_word_addr, observed_sequence, cap)
 
     def _wait_for_publication(
-        self, poll_interval: float, remaining: float | None
+        self,
+        poll_interval: float,
+        remaining: float | None,
+        observed_sequence: int,
     ) -> None:
-        """Wait one step for a new publication.
+        """Wait one step for a publication after ``observed_sequence``.
 
         On notify-enabled streams this parks in the kernel on the shared
         ``write_sequence`` word (waking the instant a producer publishes, or
         after a capped interval so dead-writer detection still runs); otherwise
-        it sleeps for ``poll_interval``.
+        it sleeps for ``poll_interval``.  ``observed_sequence`` must be the
+        sequence sampled before the caller decided to wait.
         """
         if self._notify and self._seq_word_addr is not None:
             cap = self._park_cap(remaining)
             if cap > 0:
-                self._park_once(cap)
+                self._park_once(cap, observed_sequence)
         else:
             time.sleep(poll_interval)
         self._raise_if_closing()
 
     async def _wait_for_publication_async(
-        self, poll_interval: float, remaining: float | None
+        self,
+        poll_interval: float,
+        remaining: float | None,
+        observed_sequence: int,
     ) -> None:
         """Async counterpart of :meth:`_wait_for_publication`.
 
@@ -2120,19 +2315,19 @@ class SharedMemory:
         if self._notify and self._seq_word_addr is not None:
             cap = self._park_cap(remaining)
             if cap > 0:
-                await asyncio.to_thread(self._park_once, cap)
+                await asyncio.to_thread(
+                    self._park_once, cap, observed_sequence
+                )
         else:
             await asyncio.sleep(poll_interval)
         self._raise_if_closing()
 
     def _lock_metadata_on_acquire(self) -> None:
-        self._metadata[METADATA_INDEX_LOCK_OWNER_PID] = os.getpid()
-        self._metadata[METADATA_INDEX_LOCK_DEPTH] = self._lock_state.depth
+        self._metadata.set_lock_owner(os.getpid(), self._lock_state.depth)
 
     def _lock_metadata_on_release(self) -> None:
         if self._lock_state.depth == 0:
-            self._metadata[METADATA_INDEX_LOCK_OWNER_PID] = 0
-            self._metadata[METADATA_INDEX_LOCK_DEPTH] = 0
+            self._metadata.set_lock_owner(0, 0)
             return
         self._metadata[METADATA_INDEX_LOCK_DEPTH] = self._lock_state.depth
 
@@ -2193,7 +2388,7 @@ class SharedMemory:
             # writer races any part of this block, the sequence retry below
             # discards the whole candidate rather than mixing generations.
             frame_id = self._metadata.frame_id
-            write_time = float(self._metadata[METADATA_INDEX_WRITE_TIME])
+            write_time = self._metadata.write_time
             remaining = (
                 None
                 if deadline is None
@@ -2262,7 +2457,7 @@ class SharedMemory:
                 self.gpu_device, self._cuda_sync_events
             )
             frame_id = self._metadata.frame_id
-            write_time = float(self._metadata[METADATA_INDEX_WRITE_TIME])
+            write_time = self._metadata.write_time
             remaining = (
                 None
                 if deadline is None
@@ -2352,19 +2547,18 @@ class SharedMemory:
             _release_file_lock(self._lock_state.file_handle)
         self._lock_state.thread_lock.release()
 
-    @contextmanager
     def locked(
         self,
         *,
         timeout: float | None = None,
         poll_interval: float = 1e-3,
-    ):
-        """Return a context manager for the stream lock."""
-        self.acquire(timeout=timeout, poll_interval=poll_interval)
-        try:
-            yield self
-        finally:
-            self.release()
+    ) -> _LockScope:
+        """Return a context manager for the stream lock.
+
+        Entering it acquires the lock (see :meth:`acquire`) and yields this
+        handle; leaving it releases one lock level.
+        """
+        return _LockScope(self, timeout, poll_interval)
 
     @classmethod
     def _create(
@@ -2924,7 +3118,7 @@ class SharedMemory:
                 payload,
                 count=count,
                 frame_id=self._metadata.frame_id,
-                write_time=float(self._metadata[METADATA_INDEX_WRITE_TIME]),
+                write_time=self._metadata.write_time,
             )
 
         if self._gpu_tensor is not None:
@@ -2994,7 +3188,7 @@ class SharedMemory:
                     if timeout is None
                     else max(0.0, float(timeout) - (time.monotonic() - start))
                 )
-                self._wait_for_publication(poll_interval, remaining)
+                self._wait_for_publication(poll_interval, remaining, sequence)
                 continue
             remaining = (
                 None
@@ -3030,7 +3224,7 @@ class SharedMemory:
                 if timeout is None
                 else max(0.0, float(timeout) - (time.monotonic() - start))
             )
-            self._wait_for_publication(poll_interval, remaining)
+            self._wait_for_publication(poll_interval, remaining, sequence)
         remaining = (
             None
             if timeout is None
@@ -3056,9 +3250,7 @@ class SharedMemory:
         self._ensure_open("read a publication from")
         baseline = self.count
         start = time.monotonic()
-        self.wait_for_count(
-            after=baseline, timeout=timeout, poll_interval=poll_interval
-        )
+        self._wait_for_count(baseline, timeout, poll_interval)
         remaining = (
             None
             if timeout is None
@@ -3095,6 +3287,16 @@ class SharedMemory:
             raise ValueError("after must be an integer") from exc
         if baseline < 0:
             raise ValueError("after must be non-negative")
+        return self._wait_for_count(baseline, timeout, poll_interval)
+
+    def _wait_for_count(
+        self, baseline: int, timeout: float | None, poll_interval: float
+    ) -> int:
+        """Body of :meth:`wait_for_count` for callers already guarded.
+
+        The ``read_after*`` methods count themselves as in-flight reads, so
+        they call this directly rather than re-entering the read guard.
+        """
         if timeout is not None and float(timeout) < 0.0:
             raise ValueError("timeout must be non-negative")
 
@@ -3134,7 +3336,7 @@ class SharedMemory:
                 if deadline is None
                 else max(0.0, deadline - time.monotonic())
             )
-            self._wait_for_publication(poll_interval, remaining)
+            self._wait_for_publication(poll_interval, remaining, sequence)
 
     @_guarded_read
     def read_after(
@@ -3163,11 +3365,7 @@ class SharedMemory:
         if baseline < 0:
             raise ValueError("after must be non-negative")
         start = time.monotonic()
-        self.wait_for_count(
-            after=baseline,
-            timeout=timeout,
-            poll_interval=poll_interval,
-        )
+        self._wait_for_count(baseline, timeout, poll_interval)
         remaining = (
             None
             if timeout is None
@@ -3203,9 +3401,7 @@ class SharedMemory:
         if baseline < 0:
             raise ValueError("after must be non-negative")
         start = time.monotonic()
-        self.wait_for_count(
-            after=baseline, timeout=timeout, poll_interval=poll_interval
-        )
+        self._wait_for_count(baseline, timeout, poll_interval)
         remaining = (
             None
             if timeout is None
@@ -3298,17 +3494,22 @@ class SharedMemory:
             with self.write_view_locked(frame_id=frame_id) as view:
                 yield view
 
-    @contextmanager
-    def write_view_locked(self, *, frame_id: int | None = None):
+    def write_view_locked(self, *, frame_id: int | None = None) -> _WriteView:
         """Yield a writable view while the caller-owned lock is held.
 
         This is the zero-copy publication primitive for callers that already
         acquire several stream locks in a deterministic order.  It never
         acquires or releases the process-shared lock itself; use
-        :meth:`write_view` for a standalone write.
+        :meth:`write_view` for a standalone write.  The returned context
+        manager marks the write in progress on entry and publishes it on a
+        normal exit; an exception aborts the generation instead.
 
         ``frame_id`` optionally stamps a publication token; see :meth:`write`.
         """
+        return _WriteView(self, frame_id)
+
+    def _begin_write_view(self, frame_id: int | None):
+        """Validate and open a :meth:`write_view_locked` transaction."""
         self._ensure_open("write to")
         self._ensure_writable("write to")
         if not self._lock_owned_by_current_thread():
@@ -3329,29 +3530,26 @@ class SharedMemory:
 
         self._pending_frame_id = frame_id
         self._mark_write_started()
-        view = (
+        return (
             self._gpu_tensor if self._gpu_tensor is not None else self._array
         )
+
+    def _commit_write_view(self) -> None:
+        """Publish a :meth:`write_view_locked` transaction's payload."""
         try:
-            yield view
+            if self._gpu_tensor is not None:
+                if self.cpu_mirror:
+                    np.copyto(
+                        self._array,
+                        self._gpu_tensor.detach().cpu().numpy(),
+                    )
+                _synchronize_cuda_operation(
+                    self.gpu_device, self._cuda_sync_events
+                )
         except BaseException:
             self._abort_write()
             raise
-        else:
-            try:
-                if self._gpu_tensor is not None:
-                    if self.cpu_mirror:
-                        np.copyto(
-                            self._array,
-                            self._gpu_tensor.detach().cpu().numpy(),
-                        )
-                    _synchronize_cuda_operation(
-                        self.gpu_device, self._cuda_sync_events
-                    )
-            except BaseException:
-                self._abort_write()
-                raise
-            self._finish_write()
+        self._finish_write()
 
     @_guarded_read
     async def read_new_async(
@@ -3387,7 +3585,7 @@ class SharedMemory:
                     else max(0.0, float(timeout) - elapsed)
                 )
                 await self._wait_for_publication_async(
-                    poll_interval, remaining
+                    poll_interval, remaining, sequence
                 )
                 continue
             remaining = (
@@ -3426,7 +3624,9 @@ class SharedMemory:
                 if timeout is None
                 else max(0.0, float(timeout) - (time.monotonic() - start))
             )
-            await self._wait_for_publication_async(poll_interval, remaining)
+            await self._wait_for_publication_async(
+                poll_interval, remaining, sequence
+            )
         remaining = (
             None
             if timeout is None
@@ -3743,13 +3943,12 @@ def open(
     return SharedMemory._open(name, gpu_device=gpu_device, readonly=readonly)
 
 
-@contextmanager
 def locked_many(
     streams: Sequence[SharedMemory],
     *,
     timeout: float | None = None,
     poll_interval: float = 1e-3,
-):
+) -> _LockedMany:
     """Acquire several streams in deterministic name order.
 
     The handles are yielded in the caller's original order.  Acquisition uses
@@ -3757,29 +3956,101 @@ def locked_many(
     accidentally waiting longer than its configured timeout while collecting
     locks one at a time.  Each handle remains locked until the context exits.
     """
-    handles = tuple(streams)
-    names = [handle.name for handle in handles]
-    if len(set(names)) != len(names):
-        raise ValueError("locked_many() requires unique stream names")
-    if timeout is not None and float(timeout) < 0.0:
-        raise ValueError("timeout must be non-negative")
-    if not math.isfinite(float(poll_interval)) or float(poll_interval) <= 0.0:
-        raise ValueError("poll_interval must be positive")
-    deadline = None if timeout is None else time.monotonic() + float(timeout)
-    with ExitStack() as stack:
-        for handle in sorted(handles, key=lambda item: item.name):
-            remaining = (
-                None
-                if deadline is None
-                else max(0.0, deadline - time.monotonic())
-            )
-            stack.enter_context(
-                handle.locked(
-                    timeout=remaining,
-                    poll_interval=float(poll_interval),
+    return _LockedMany(streams, timeout, poll_interval)
+
+
+class _LockedMany:
+    """Context manager returned by :func:`locked_many`.
+
+    shmpipeline enters one of these on every frame.  Plain
+    :class:`SharedMemory` handles are acquired and released directly, which
+    is exactly what their :meth:`~SharedMemory.locked` scope does, without a
+    generator and ExitStack per frame.  Any other handle type keeps the
+    original duck-typed path through its own ``locked()`` context manager.
+    Arguments are validated on entry, as they were by the generator form.
+    """
+
+    __slots__ = ("_streams", "_timeout", "_poll_interval", "_exit")
+
+    def __init__(
+        self,
+        streams: Sequence[SharedMemory],
+        timeout: float | None,
+        poll_interval: float,
+    ) -> None:
+        self._streams = streams
+        self._timeout = timeout
+        self._poll_interval = poll_interval
+        self._exit: Any = None
+
+    def __enter__(self) -> tuple[SharedMemory, ...]:
+        handles = tuple(self._streams)
+        ordered = sorted(handles, key=_handle_name)
+        for previous, current in zip(ordered, ordered[1:]):
+            if previous.name == current.name:
+                raise ValueError("locked_many() requires unique stream names")
+        timeout = self._timeout
+        if timeout is not None and float(timeout) < 0.0:
+            raise ValueError("timeout must be non-negative")
+        poll_interval = float(self._poll_interval)
+        if not math.isfinite(poll_interval) or poll_interval <= 0.0:
+            raise ValueError("poll_interval must be positive")
+        deadline = (
+            None if timeout is None else time.monotonic() + float(timeout)
+        )
+        if all(type(handle) is SharedMemory for handle in ordered):
+            acquired: list[SharedMemory] = []
+            self._exit = acquired
+            try:
+                for handle in ordered:
+                    handle.acquire(
+                        timeout=_remaining(deadline),
+                        poll_interval=poll_interval,
+                    )
+                    acquired.append(handle)
+            except BaseException:
+                _release_in_reverse(acquired)
+                raise
+            return handles
+        with ExitStack() as stack:
+            for handle in ordered:
+                stack.enter_context(
+                    handle.locked(
+                        timeout=_remaining(deadline),
+                        poll_interval=poll_interval,
+                    )
                 )
-            )
-        yield handles
+            self._exit = stack.pop_all()
+        return handles
+
+    def __exit__(self, exc_type, exc, tb):
+        if isinstance(self._exit, ExitStack):
+            return self._exit.__exit__(exc_type, exc, tb)
+        _release_in_reverse(self._exit)
+        return None
+
+
+def _remaining(deadline: float | None) -> float | None:
+    return None if deadline is None else max(0.0, deadline - time.monotonic())
+
+
+def _release_in_reverse(handles: list[SharedMemory]) -> None:
+    """Release and forget ``handles`` last-first.
+
+    If one release raises, the remaining handles are still released before
+    the error propagates, as ExitStack would.
+    """
+    while handles:
+        handle = handles.pop()
+        try:
+            handle.release()
+        except BaseException:
+            _release_in_reverse(handles)
+            raise
+
+
+def _handle_name(handle: SharedMemory) -> str:
+    return handle.name
 
 
 @contextmanager

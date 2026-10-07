@@ -43,8 +43,9 @@ outlive its creator. pyshmem is not tested on Windows; use Linux or macOS.
 Lock files
 ----------
 
-pyshmem uses ``portalocker`` file locks for cross-process write serialisation.
-Lock files are stored in a per-user directory:
+pyshmem uses OS file locks for cross-process write serialisation: ``flock(2)``
+on Linux and macOS (the primitive ``portalocker`` uses there, so mixed pyshmem
+versions interoperate) and ``portalocker`` on Windows.  Lock files are stored in a per-user directory:
 
 .. code-block:: text
 
@@ -69,8 +70,7 @@ streams must agree on the lock directory — if one process writes to
 will not serialise correctly.
 
 Lock files are small and intentionally persist across stream unlink/recreate
-cycles. ``portalocker`` uses OS-level file locks that are
-released automatically when a process crashes, so stale locks do not block
+cycles. These OS-level file locks are released automatically when a process crashes, so stale locks do not block
 subsequent writers.
 
 Unlink/recreate with live handles

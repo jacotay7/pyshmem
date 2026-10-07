@@ -5,6 +5,63 @@ All notable user-facing changes are documented here. The project follows
 
 ## Unreleased
 
+## 1.4.0 - 2026-10-07
+
+Measured on an 80-core Arm Neoverse-N1 (Linux 6.17, Python 3.13, NumPy 2.5,
+RTX 4060), writer and reader pinned to separate cores, median of 3
+interleaved runs; x86-64 figures exercise the x86 code path's Python cost on
+the same host.
+
+### Fixed
+
+- **Notification waits no longer sleep through a publication.** On
+  `notify=True` streams, `read_new`, `wait_for_count`, `read_after*` and
+  `read_new_async` re-read the futex word just before parking instead of
+  passing the sequence their wait condition had checked. A publication landing
+  between the check and the park was then missed until the 50 ms park cap (or
+  the caller's shorter timeout) expired. shmpipeline uses notify streams for
+  every kernel trigger, where this showed up as ~10 ms p99 stalls: its smoke
+  pipeline's end-to-end p99 drops from 10.5 ms to 0.12 ms, and the notify
+  ping-pong's maximum from 50.8 ms to 0.2 ms.
+
+### Performance
+
+The public API, on-disk format and locking/consistency semantics are
+unchanged; streams can be shared with processes running older releases.
+
+- Per-publication metadata fields are bound once per handle as ctypes scalars
+  (previously every atomic load or store exported the structured header to
+  ctypes, ~2.6 µs each, and index access rebuilt a dict per call); libatomic
+  loads/stores take the cached address directly.
+- The stream lock calls `flock(2)` directly on POSIX (~1 µs per lock/unlock
+  instead of ~8 µs through portalocker's flag validation and dispatch).
+  portalocker uses the same `flock` primitive there and is still used on
+  Windows, so mixed-version writers keep excluding each other (checked with
+  four concurrent writers, two on 1.3.8: 142,769 writes, none lost, no torn
+  reads).
+- Stale-lock detection uses `fstat` on the open lock file instead of `stat` on
+  its path; writers read back their own sequence without an atomic load.
+- `locked()`, `write_view_locked()` and `locked_many()` return small context
+  manager classes instead of generator/ExitStack contexts; `read_after*` no
+  longer counts itself in flight twice; futex syscalls use typed prototypes;
+  GPU synchronization passes the device index to `torch.cuda.current_stream`.
+
+| Small payload (97 float32), Arm | 1.3.8 p50 / p99 (µs) | 1.4.0 p50 / p99 (µs) |
+| --- | --- | --- |
+| `write` | 46.6 / 57.9 | 11.2 / 20.0 |
+| `read` | 11.2 / 14.7 | 3.6 / 3.9 |
+| `read_publication` | 13.8 / 17.9 | 5.2 / 5.5 |
+| `read_after_publication` (data ready) | 24.3 / 29.4 | 9.4 / 10.5 |
+| `locked()` + `write_view_locked()` | 49.9 / 61.0 | 11.3 / 18.1 |
+| `locked_many([one])` | 22.8 / 32.4 | 7.4 / 8.2 |
+| `write`, x86-64 code path | 24.8 / 31.5 | 7.9 / 9.6 |
+
+| Cross-process round trip, Arm | 1.3.8 p50 / p99 (µs) | 1.4.0 p50 / p99 (µs) |
+| --- | --- | --- |
+| `benchmarks/benchmark_ipc.py` CPU, 64 KiB | 299 / 405 | 115 / 196 |
+| `benchmarks/benchmark_ipc.py` GPU, 64 KiB | 603 / 868 | 397 / 591 |
+| notify streams, `wait_for_count`/`read_after`, 64 B | 469 / 774 | 63 / 86 |
+
 ## 1.3.8 - 2026-09-29
 
 ### Fixed
