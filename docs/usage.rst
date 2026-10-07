@@ -354,8 +354,8 @@ Locking
 more advanced scenarios — reading without a copy, or writing multiple streams
 atomically — take the lock explicitly.
 
-The lock is cross-process (backed by a ``portalocker`` file lock) and
-re-entrant within the current thread.
+The lock is cross-process (backed by a ``flock(2)`` file lock on POSIX and a
+``portalocker`` lock on Windows) and re-entrant within the current thread.
 
 Context manager (recommended)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

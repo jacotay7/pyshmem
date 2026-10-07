@@ -185,8 +185,11 @@ What pyshmem relies on
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 - **Single-writer serialization.** Concurrent writers are excluded by the
-  cross-process ``portalocker`` file lock, so only one process ever advances the
-  sequence at a time.
+  cross-process file lock (``flock(2)`` on POSIX, ``portalocker`` on Windows),
+  so only one process ever advances the sequence at a time.  pyshmem 1.4.0
+  calls ``flock`` directly instead of through ``portalocker``; that is the
+  primitive ``portalocker`` uses on POSIX, so older and newer releases sharing
+  a stream still exclude each other.
 - **Architecture-specific publication barriers.** On x86-64, naturally aligned
   stores plus TSO ordering provide the required publication order without FFI
   overhead. Elsewhere pyshmem uses GCC ``libatomic`` acquire/release operations
