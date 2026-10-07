@@ -1369,6 +1369,74 @@ def test_notify_read_new_timeout_is_honored(shm_name):
 
 
 @pytest.mark.skipif(
+    not pyshmem_shared._FUTEX_AVAILABLE,
+    reason="kernel notifications need a Linux futex",
+)
+def test_notify_wait_sees_publication_between_check_and_park(
+    shm_name, monkeypatch
+):
+    # A publication that lands after wait_for_count samples the count but
+    # before it parks must not be slept through until the park cap expires:
+    # the park has to compare against the sequence the check observed.
+    monkeypatch.setattr(pyshmem_shared, "_NOTIFY_MAX_PARK", 10.0)
+    writer = pyshmem.create(
+        shm_name, shape=(2,), dtype=np.float32, notify=True
+    )
+    reader = pyshmem.open(shm_name)
+    sample = reader._sample_publication_state
+    published = []
+
+    def sample_then_publish(**kwargs):
+        state = sample(**kwargs)
+        if not published:
+            published.append(True)
+            writer.write(np.ones(2, dtype=np.float32))
+        return state
+
+    monkeypatch.setattr(
+        reader, "_sample_publication_state", sample_then_publish
+    )
+    try:
+        started = time.monotonic()
+        assert reader.wait_for_count(after=0, timeout=5.0) == 1
+        assert time.monotonic() - started < 1.0
+    finally:
+        reader.close()
+        writer.unlink()
+
+
+@pytest.mark.skipif(
+    not pyshmem_shared._FUTEX_AVAILABLE,
+    reason="kernel notifications need a Linux futex",
+)
+def test_notify_read_new_sees_publication_between_check_and_park(
+    shm_name, monkeypatch
+):
+    monkeypatch.setattr(pyshmem_shared, "_NOTIFY_MAX_PARK", 10.0)
+    writer = pyshmem.create(
+        shm_name, shape=(2,), dtype=np.float32, notify=True
+    )
+    reader = pyshmem.open(shm_name)
+    wait = reader._wait_for_publication
+    published = []
+
+    def publish_then_wait(*args):
+        if not published:
+            published.append(True)
+            writer.write(np.full(2, 3.0, dtype=np.float32))
+        return wait(*args)
+
+    monkeypatch.setattr(reader, "_wait_for_publication", publish_then_wait)
+    try:
+        started = time.monotonic()
+        assert reader.read_new(timeout=5.0).tolist() == [3.0, 3.0]
+        assert time.monotonic() - started < 1.0
+    finally:
+        reader.close()
+        writer.unlink()
+
+
+@pytest.mark.skipif(
     sys.platform == "win32",
     reason="crash recovery relies on POSIX process-shared locks",
 )

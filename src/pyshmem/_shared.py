@@ -2084,33 +2084,42 @@ class SharedMemory:
             else min(remaining, _NOTIFY_MAX_PARK)
         )
 
-    def _park_once(self, cap: float) -> None:
-        # Read the futex word immediately before waiting so a publication that
-        # lands in this window changes the word and makes the kernel's compare-
-        # and-block return at once instead of sleeping (no lost wakeup).
-        word = ctypes.c_uint32.from_address(self._seq_word_addr).value
-        _futex_wait(self._seq_word_addr, word, cap)
+    def _park_once(self, cap: float, observed_sequence: int) -> None:
+        # Block only while the futex word still holds the sequence the caller
+        # evaluated its wait condition against.  A publication after that
+        # sample changes the word, so the kernel's compare-and-block returns
+        # at once instead of sleeping (no lost wakeup).  Re-reading the word
+        # here instead would let a publication that landed between the
+        # caller's check and this park go unnoticed until the cap expired.
+        _futex_wait(self._seq_word_addr, observed_sequence, cap)
 
     def _wait_for_publication(
-        self, poll_interval: float, remaining: float | None
+        self,
+        poll_interval: float,
+        remaining: float | None,
+        observed_sequence: int,
     ) -> None:
-        """Wait one step for a new publication.
+        """Wait one step for a publication after ``observed_sequence``.
 
         On notify-enabled streams this parks in the kernel on the shared
         ``write_sequence`` word (waking the instant a producer publishes, or
         after a capped interval so dead-writer detection still runs); otherwise
-        it sleeps for ``poll_interval``.
+        it sleeps for ``poll_interval``.  ``observed_sequence`` must be the
+        sequence sampled before the caller decided to wait.
         """
         if self._notify and self._seq_word_addr is not None:
             cap = self._park_cap(remaining)
             if cap > 0:
-                self._park_once(cap)
+                self._park_once(cap, observed_sequence)
         else:
             time.sleep(poll_interval)
         self._raise_if_closing()
 
     async def _wait_for_publication_async(
-        self, poll_interval: float, remaining: float | None
+        self,
+        poll_interval: float,
+        remaining: float | None,
+        observed_sequence: int,
     ) -> None:
         """Async counterpart of :meth:`_wait_for_publication`.
 
@@ -2120,7 +2129,9 @@ class SharedMemory:
         if self._notify and self._seq_word_addr is not None:
             cap = self._park_cap(remaining)
             if cap > 0:
-                await asyncio.to_thread(self._park_once, cap)
+                await asyncio.to_thread(
+                    self._park_once, cap, observed_sequence
+                )
         else:
             await asyncio.sleep(poll_interval)
         self._raise_if_closing()
@@ -2994,7 +3005,7 @@ class SharedMemory:
                     if timeout is None
                     else max(0.0, float(timeout) - (time.monotonic() - start))
                 )
-                self._wait_for_publication(poll_interval, remaining)
+                self._wait_for_publication(poll_interval, remaining, sequence)
                 continue
             remaining = (
                 None
@@ -3030,7 +3041,7 @@ class SharedMemory:
                 if timeout is None
                 else max(0.0, float(timeout) - (time.monotonic() - start))
             )
-            self._wait_for_publication(poll_interval, remaining)
+            self._wait_for_publication(poll_interval, remaining, sequence)
         remaining = (
             None
             if timeout is None
@@ -3134,7 +3145,7 @@ class SharedMemory:
                 if deadline is None
                 else max(0.0, deadline - time.monotonic())
             )
-            self._wait_for_publication(poll_interval, remaining)
+            self._wait_for_publication(poll_interval, remaining, sequence)
 
     @_guarded_read
     def read_after(
@@ -3387,7 +3398,7 @@ class SharedMemory:
                     else max(0.0, float(timeout) - elapsed)
                 )
                 await self._wait_for_publication_async(
-                    poll_interval, remaining
+                    poll_interval, remaining, sequence
                 )
                 continue
             remaining = (
@@ -3426,7 +3437,9 @@ class SharedMemory:
                 if timeout is None
                 else max(0.0, float(timeout) - (time.monotonic() - start))
             )
-            await self._wait_for_publication_async(poll_interval, remaining)
+            await self._wait_for_publication_async(
+                poll_interval, remaining, sequence
+            )
         remaining = (
             None
             if timeout is None
